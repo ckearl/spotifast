@@ -750,6 +750,9 @@ pub struct SearchState {
     /// a prefix; the next query of the same run replaces it.
     pub typed_entry: Option<(u64, String)>,
     pub focus_requested: bool,
+    /// The committed query came from the mini player's FIND, which keeps
+    /// no Recent searches.
+    pub unrecorded: bool,
 }
 
 #[derive(Default)]
@@ -1221,6 +1224,9 @@ pub enum Action {
     },
     OpenInSpotify(String),
     Search(String),
+    /// The mini player's FIND searches for this, leaving the big window's
+    /// page and Recent searches alone.
+    FindSearch(String),
     /// The search field was emptied or its selection typed over, so the
     /// next query starts a new run of typing.
     EndSearchRun,

@@ -6224,6 +6224,7 @@ impl App {
         self.search.serial += 1;
         self.search.committed = query.clone();
         self.search.committed_run = None;
+        self.search.unrecorded = false;
         self.search.playlists = None;
         self.search.error = None;
         self.search.catalogue_pending = !query.is_empty();
@@ -6270,6 +6271,9 @@ impl App {
     /// same run recorded takes its place instead of adding another. Only an
     /// entry the run itself added is replaced.
     fn remember_search(&mut self, query: &str) {
+        if self.search.unrecorded {
+            return;
+        }
         let query = query.trim();
         if let Some((run, typing)) = self.search.committed_run
             && self.search.typed_entry != Some((run, query.to_string()))
@@ -11217,6 +11221,16 @@ impl App {
                 } else {
                     self.search.edit_run += 1;
                     self.run_search(query.trim().to_string());
+                }
+            }
+            Action::FindSearch(query) => {
+                self.search.query = query.clone();
+                let serial = self.search.serial;
+                self.run_search(query.trim().to_string());
+                // Only a search this started: the big window's own search
+                // for the same words still records.
+                if self.search.serial != serial {
+                    self.search.unrecorded = true;
                 }
             }
             Action::EndSearchRun => self.search.edit_run += 1,
@@ -19862,6 +19876,33 @@ mod tests {
         assert_eq!(app.tray_wait, None, "a panel shows the item");
         app.check_tray_wait(started + TRAY_WAIT, false);
         assert!(!app.wants_show);
+        app.backend.shutdown();
+    }
+
+    /// FIND searches in place: the big window stays where it was, and
+    /// nothing the mini player types goes into Recent searches.
+    #[test]
+    fn a_find_search_leaves_the_page_and_the_history_alone() {
+        let mut app = test_app("find-search");
+        app.settings.search_history = vec!["older".into()];
+        let page = app.page().clone();
+        let run = app.search.edit_run;
+        app.actions.push(Action::FindSearch(" radiohead ".into()));
+        app.apply_actions(&egui::Context::default());
+        assert_eq!(app.search.query, " radiohead ");
+        assert_eq!(app.search.committed, "radiohead");
+        assert_eq!(app.page(), &page);
+        assert_eq!(app.search.edit_run, run);
+        let serial = app.search.serial;
+        answer_search(&mut app, "radiohead", serial);
+        assert!(matches!(app.search.results, Loadable::Loaded(_)));
+        assert_eq!(app.settings.search_history, ["older"]);
+
+        // The big window's own search still remembers.
+        submit_search(&mut app, "khruangbin");
+        let serial = app.search.serial;
+        answer_search(&mut app, "khruangbin", serial);
+        assert_eq!(app.settings.search_history, ["khruangbin", "older"]);
         app.backend.shutdown();
     }
 

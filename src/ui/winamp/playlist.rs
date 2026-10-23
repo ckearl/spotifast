@@ -10,7 +10,7 @@ use egui::{Color32, Sense};
 use crate::api::models::PlayableItem;
 use crate::app::{App, NowPlaying};
 use crate::i18n::{gettext, pgettext};
-use crate::model::{Action, Page, RowContext};
+use crate::model::{Action, Page, RowContext, WinampSection};
 use crate::skin::layout::{self, Area};
 use crate::skin::sprites;
 use crate::util;
@@ -582,20 +582,33 @@ fn menus(app: &mut App, view: &mut View, rows: &[Row], queue_uris: &[String], he
     }
 }
 
-/// Where a song comes from here: the big window's search or Liked Songs.
+/// Where a song comes from here: FIND's search, or the big window's Liked
+/// Songs.
 fn add_menu(app: &mut App, ui: &mut egui::Ui) {
     let locale = app.locale;
     if ui
         .button(gettext(locale, "Search Spotify").as_ref())
         .clicked()
     {
-        app.actions.push(Action::FocusSearch);
-        app.actions.push(Action::ToggleWinampWindow);
+        search_in_find(app);
     }
     if ui.button(gettext(locale, "Liked Songs").as_ref()).clicked() {
         app.actions.push(Action::Open(Page::LikedSongs));
         app.actions.push(Action::ToggleWinampWindow);
     }
+}
+
+/// Opens FIND, rolled down, with its box ready to type in.
+fn search_in_find(app: &mut App) {
+    if !app.settings.section_open(WinampSection::Find) {
+        app.actions
+            .push(Action::ToggleWinampSection(WinampSection::Find));
+    }
+    if app.settings.section_shaded(WinampSection::Find) {
+        app.actions
+            .push(Action::ToggleWinampSectionShade(WinampSection::Find));
+    }
+    app.winamp.find.focus_requested = true;
 }
 
 fn rem_menu(app: &mut App, ui: &mut egui::Ui, rows: &[Row]) {
@@ -758,6 +771,40 @@ fn list_menu(app: &mut App, ui: &mut egui::Ui, rows: &[Row], queue_uris: &[Strin
 mod tests {
     use super::super::section::rows_for_wheel;
     use super::*;
+
+    /// ADD's Search Spotify stays in the mini player: it opens FIND,
+    /// rolled down, and gives its box the keyboard.
+    #[test]
+    fn search_spotify_opens_find_ready_to_type() {
+        let root =
+            std::env::temp_dir().join(format!("spotifast-winamp-add-{}", std::process::id()));
+        let mut app = App::new(
+            &crate::backend::Waker::default(),
+            crate::paths::AppDirs {
+                config: root.join("config"),
+                state: root.join("state"),
+                cache: root.join("cache"),
+            },
+            crate::settings::Settings::default(),
+            crate::app::AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+                autostart: false,
+            },
+        );
+        app.settings.find_shaded = true;
+        search_in_find(&mut app);
+        assert!(matches!(
+            app.actions.as_slice(),
+            [
+                Action::ToggleWinampSection(WinampSection::Find),
+                Action::ToggleWinampSectionShade(WinampSection::Find)
+            ]
+        ));
+        assert!(app.winamp.find.focus_requested);
+        app.backend.shutdown();
+    }
 
     #[test]
     fn rows_are_numbered_the_way_winamp_did() {

@@ -1438,6 +1438,26 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.settings.find_height = 174;
                 app.settings.lyrics_height = 145;
             }
+            // FIND open on the demo's search, typing, with a row picked;
+            // `find-albums` shows another mode, `find-empty` the empty box.
+            "find" => {
+                app.settings.find_open = true;
+                app.settings.find_height = 203;
+                let find = &mut app.winamp.find;
+                let _ = find.set_query(app.search.committed.clone());
+                if let Loadable::Loaded(results) = &app.search.results {
+                    find.held = Some((app.search.results_serial, results.clone()));
+                }
+                find.selected = Some(2);
+                find.focused = true;
+            }
+            "find-albums" => {
+                app.winamp.find.mode = crate::ui::winamp::find::state::FindMode::Albums
+            }
+            "find-empty" => {
+                app.settings.find_open = true;
+                let _ = app.winamp.find.set_query(String::new());
+            }
             // One screen pixel per skin pixel; after `winamp`, which asks
             // for two.
             "winamp-1x" => app.settings.skin_scale = Some(1),

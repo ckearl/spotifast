@@ -111,6 +111,8 @@ pub struct WinampState {
     /// leftover, as the playlist keeps them.
     pub find_scroll: usize,
     pub find_wheel: f32,
+    /// FIND's box, mode and pages.
+    pub find: crate::ui::winamp::find::FindState,
     pub lyrics_scroll: usize,
     pub lyrics_wheel: f32,
     /// The leftover of a section's corner drag; one is dragged at a time.
@@ -163,6 +165,7 @@ impl WinampState {
             playlist_text: crate::ui::winamp::PixelText::default(),
             find_scroll: 0,
             find_wheel: 0.0,
+            find: Default::default(),
             lyrics_scroll: 0,
             lyrics_wheel: 0.0,
             section_resize: 0.0,

@@ -1,0 +1,681 @@
+//! FIND: search Spotify from the mini player.
+//!
+//! From the top: a box to type in, drawn in the list's colours with the
+//! playlist's font and a blinking caret; the row of modes; the list; and
+//! the bottom bar's buttons. The section takes the keyboard while it has
+//! focus, which a click in it gives and a click elsewhere in the window,
+//! or Escape, takes away.
+
+use std::borrow::Cow;
+use std::time::{Duration, Instant};
+
+use egui::{Color32, Event, Key, Sense};
+
+use crate::app::App;
+use crate::i18n::gettext;
+use crate::model::{Action, Loadable, WinampSection};
+use crate::skin::layout::{self, Area};
+use crate::util;
+
+use super::section::{self, ListRow};
+use super::{PixelText, View};
+
+pub mod state;
+
+pub use state::FindState;
+use state::{FindRow, ItemKind};
+
+/// One row of text, as the playlist's.
+const ROW: u32 = layout::PLAYLIST_TRACK_HEIGHT;
+/// The bottom bar. +LIST and RADIO arrive with the actions and pages.
+const BUTTONS: [&str; 5] = ["PLAY", "+QUEUE", "+LIST", "RADIO", "BACK"];
+const PLAY: usize = 0;
+const QUEUE: usize = 1;
+const BACK: usize = 4;
+/// Half a blink of the caret.
+const BLINK: Duration = Duration::from_millis(530);
+
+/// The rows the list shows. The answer is only shown for what the box
+/// holds; until that comes the last answer shown stays, so the rows never
+/// belong to a query the user has typed past, nor flicker away.
+pub(super) fn visible_rows(app: &App) -> Vec<FindRow> {
+    let find = &app.winamp.find;
+    // The library, recent songs and the pages come with their own lists.
+    if find.stack.len() > 1 || !find.mode.is_search() {
+        return Vec::new();
+    }
+    if let Loadable::Loaded(results) = &app.search.results
+        && app.search.committed == find.query.trim()
+    {
+        return find.top_search_rows(results);
+    }
+    find.held
+        .as_ref()
+        .map(|(_, results)| find.top_search_rows(results))
+        .unwrap_or_default()
+}
+
+/// Keeps the answer for what the box holds, to show while the next one is
+/// awaited. A new answer has new rows, so the selection goes.
+fn hold_answer(app: &mut App) {
+    let find = &mut app.winamp.find;
+    if let Loadable::Loaded(results) = &app.search.results
+        && !find.query.trim().is_empty()
+        && app.search.committed == find.query.trim()
+        && find
+            .held
+            .as_ref()
+            .is_none_or(|(serial, _)| *serial != app.search.results_serial)
+    {
+        find.held = Some((app.search.results_serial, results.clone()));
+        find.selected = None;
+    }
+}
+
+/// Double-click, Enter or PLAY on a row. A song plays on its own and
+/// Spotify's autoplay carries on after it; the other kinds open inside
+/// FIND once it has pages.
+fn choose(app: &mut App, row: &FindRow) {
+    if row.kind == ItemKind::Song {
+        app.actions.push(Action::PlayUris {
+            uris: vec![row.uri.clone()],
+            index: 0,
+        });
+    }
+}
+
+/// +QUEUE on a row.
+fn queue(app: &mut App, row: &FindRow) {
+    if row.kind == ItemKind::Song {
+        app.actions.push(Action::AddToQueue {
+            uri: row.uri.clone(),
+            label: row.label.clone(),
+        });
+    }
+}
+
+/// The selected row, if it is still on the list.
+fn selected_row(app: &App) -> Option<FindRow> {
+    let index = app.winamp.find.selected?;
+    visible_rows(app).into_iter().nth(index)
+}
+
+/// Whether FIND is drawn open, so it can hold the keyboard.
+fn open(app: &App) -> bool {
+    app.settings.section_open(WinampSection::Find)
+        && !app.settings.section_shaded(WinampSection::Find)
+}
+
+/// The keyboard, before the mini player's own keys see it: while FIND has
+/// focus it takes typed text, pastes, and every key without Cmd (Ctrl
+/// elsewhere), so M types an "m" rather than muting. Cmd shortcuts still
+/// reach the window, except Cmd+Backspace, which empties the box. Also runs
+/// the search a pause in typing has made due.
+pub(super) fn keys(app: &mut App, ctx: &egui::Context) {
+    let now = Instant::now();
+    if open(app) {
+        if std::mem::take(&mut app.winamp.find.focus_requested) {
+            app.winamp.find.focused = true;
+        }
+    } else {
+        app.winamp.find.focused = false;
+    }
+    if app.winamp.find.focused {
+        for event in take_keys(ctx) {
+            key(app, event, now);
+        }
+    }
+    let due = app.winamp.find.due(now);
+    app.actions.extend(due);
+    if let Some(wait) = app.winamp.find.wait(now) {
+        ctx.request_repaint_after(wait);
+    }
+}
+
+/// Takes this frame's typing out of egui's input.
+fn take_keys(ctx: &egui::Context) -> Vec<Event> {
+    ctx.input_mut(|input| {
+        let mut taken = Vec::new();
+        input.events.retain(|event| {
+            let take = match event {
+                Event::Text(_) | Event::Paste(_) => true,
+                Event::Key { key, modifiers, .. } => !modifiers.command || *key == Key::Backspace,
+                _ => false,
+            };
+            if take {
+                taken.push(event.clone());
+            }
+            !take
+        });
+        taken
+    })
+}
+
+/// One taken event.
+fn key(app: &mut App, event: Event, now: Instant) {
+    match event {
+        Event::Text(text) | Event::Paste(text) => {
+            let text: String = text
+                .chars()
+                .map(|c| if c.is_whitespace() { ' ' } else { c })
+                .filter(|c| !c.is_control())
+                .collect();
+            let query = app.winamp.find.query.clone() + &text;
+            retype(app, query, now);
+        }
+        Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } => match key {
+            Key::Backspace if modifiers.command || modifiers.ctrl => {
+                let actions = app.winamp.find.set_query(String::new());
+                app.actions.extend(actions);
+                app.winamp.find_scroll = 0;
+            }
+            Key::Backspace if app.winamp.find.query.is_empty() => back(app),
+            Key::Backspace => {
+                let mut query = app.winamp.find.query.clone();
+                query.pop();
+                retype(app, query, now);
+            }
+            Key::Enter => {
+                let find = &mut app.winamp.find;
+                if find.pending.is_some() || find.selected.is_none() {
+                    let actions = find.submit();
+                    app.actions.extend(actions);
+                } else if let Some(row) = selected_row(app) {
+                    choose(app, &row);
+                }
+            }
+            Key::Escape => app.winamp.find.focused = false,
+            Key::ArrowDown => step(app, 1),
+            Key::ArrowUp => step(app, -1),
+            Key::Tab => {
+                app.winamp.find.cycle_mode(!modifiers.shift);
+                app.winamp.find_scroll = 0;
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+/// BACK, or Backspace in an empty box: out of the page FIND is in.
+fn back(app: &mut App) {
+    if app.winamp.find.back() {
+        app.winamp.find_scroll = 0;
+    }
+}
+
+/// The box changed under the user's keys.
+fn retype(app: &mut App, query: String, now: Instant) {
+    if query != app.winamp.find.query {
+        app.winamp.find.type_query(query, now);
+        app.winamp.find_scroll = 0;
+    }
+}
+
+/// The rows a list area of the section's height has in view.
+fn rows_in_view(app: &App) -> usize {
+    let height = app.settings.section_height(WinampSection::Find);
+    (split(section::list_area(height)).2.height / ROW) as usize
+}
+
+/// Moves the selection a row, keeping it in view.
+fn step(app: &mut App, delta: i64) {
+    let count = visible_rows(app).len();
+    if count == 0 {
+        return;
+    }
+    let last = count as i64 - 1;
+    let index = match app.winamp.find.selected {
+        None if delta > 0 => 0,
+        None => last,
+        Some(index) => (index as i64 + delta).clamp(0, last),
+    } as usize;
+    app.winamp.find.selected = Some(index);
+    let in_view = rows_in_view(app).max(1);
+    let scroll = &mut app.winamp.find_scroll;
+    if index < *scroll {
+        *scroll = index;
+    } else if index >= *scroll + in_view {
+        *scroll = index + 1 - in_view;
+    }
+}
+
+/// The list's area cut into the box, the mode row and the list.
+fn split(area: Area) -> (Area, Area, Area) {
+    let bar = Area::new(area.x, area.y, area.width, ROW.min(area.height));
+    let modes = Area::new(
+        area.x,
+        area.y + bar.height,
+        area.width,
+        ROW.min(area.height - bar.height),
+    );
+    let top = bar.height + modes.height;
+    let list = Area::new(area.x, area.y + top, area.width, area.height - top);
+    (bar, modes, list)
+}
+
+/// The section, under the sections above it. `focused` is the window's.
+pub(super) fn show(app: &mut App, view: &mut View, focused: bool) {
+    let title = app.winamp.find.title();
+    let Some(chrome) = section::frame(app, view, WinampSection::Find, &title, focused) else {
+        app.winamp.find.focused = false;
+        return;
+    };
+    let height = chrome.height;
+    take_focus(app, view, height);
+    hold_answer(app);
+    let (bar, modes, area) = split(section::list_area(height));
+    input_bar(app, view, bar, focused);
+    mode_row(app, view, modes);
+
+    let rows = visible_rows(app);
+    let playing = app.now_playing().map(|now| now.uri);
+    let selected = app.winamp.find.selected;
+    let lines: Vec<ListRow> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| ListRow {
+            label: Cow::Owned(format!("{}. {}", index + 1, row.label)),
+            right: row.duration_ms.map(util::format_duration_ms),
+            current: playing.as_deref() == Some(row.uri.as_str()),
+            selected: selected == Some(index),
+        })
+        .collect();
+    let winamp = &mut app.winamp;
+    let response = section::list(
+        view,
+        &mut winamp.playlist_text,
+        &lines,
+        &mut winamp.find_scroll,
+        &mut winamp.find_wheel,
+        area,
+        WinampSection::Find,
+    );
+    if let Some(index) = response.clicked.or(response.secondary) {
+        winamp.find.selected = Some(index);
+    }
+    if let Some(row) = response.double_clicked.and_then(|index| rows.get(index)) {
+        choose(app, row);
+    }
+
+    let chosen = app.winamp.find.selected.and_then(|index| rows.get(index));
+    match section::bottom_buttons(view, height, &BUTTONS, "find") {
+        Some(PLAY) => {
+            if let Some(row) = chosen {
+                choose(app, row);
+            }
+        }
+        Some(QUEUE) => {
+            if let Some(row) = chosen {
+                queue(app, row);
+            }
+        }
+        Some(BACK) => back(app),
+        _ => {}
+    }
+}
+
+/// A press in the section gives it the keyboard; a press anywhere else in
+/// the window takes it back.
+fn take_focus(app: &mut App, view: &View, height: u32) {
+    let section = view.rect(Area::new(0, 0, layout::WINDOW_WIDTH, height));
+    let pressed = view.ui.ctx().input(|input| {
+        input
+            .pointer
+            .any_pressed()
+            .then(|| input.pointer.press_origin())
+            .flatten()
+    });
+    if let Some(origin) = pressed {
+        app.winamp.find.focused = section.contains(origin);
+    }
+}
+
+/// The skin's list colour as egui's.
+fn rgb([r, g, b]: [u8; 3]) -> Color32 {
+    Color32::from_rgb(r, g, b)
+}
+
+/// A line of the playlist's font in a colour, from the left of `at` and
+/// centred in its height, cut at its right. Returns how wide it drew.
+fn write(view: &View, text: &mut PixelText, label: &str, at: Area, color: Color32) -> u32 {
+    let ctx = view.ui.ctx().clone();
+    let line = text.line(&ctx, label);
+    let width = line.width.min(at.width);
+    let dest = Area::new(
+        at.x,
+        at.y + at.height.saturating_sub(line.height) / 2,
+        width,
+        line.height,
+    );
+    let uv = egui::Rect::from_min_max(
+        egui::pos2(0.0, 0.0),
+        egui::pos2(width as f32 / line.width.max(1) as f32, 1.0),
+    );
+    let clip = view.rect(at).intersect(view.ui.clip_rect());
+    view.ui
+        .painter()
+        .with_clip_rect(clip)
+        .image(line.texture.id(), view.rect(dest), uv, color);
+    width
+}
+
+/// The end of the text that fits `width`, so the caret stays in view.
+fn tail(text: &mut PixelText, label: &str, width: f32) -> String {
+    let mut chars = label.chars();
+    while text.width(chars.as_str()) > width && chars.next().is_some() {}
+    chars.as_str().to_string()
+}
+
+/// The box: its edge, the query or a hint, the caret while it has the
+/// keyboard, and the X that empties it.
+fn input_bar(app: &mut App, view: &mut View, bar: Area, window_focused: bool) {
+    let style = view.skin.playlist.clone();
+    let ink = rgb(style.normal);
+    let edge = ink.gamma_multiply(0.5);
+    view.fill(bar.x, bar.y, bar.width, 1, edge);
+    view.fill(bar.x, bar.y + bar.height - 1, bar.width, 1, edge);
+    view.fill(bar.x, bar.y, 1, bar.height, edge);
+    view.fill(bar.x + bar.width - 1, bar.y, 1, bar.height, edge);
+
+    let cross = Area::new(bar.x + bar.width - ROW, bar.y, ROW, bar.height);
+    let field = Area::new(bar.x + 3, bar.y, cross.x - bar.x - 3, bar.height);
+    let find = &app.winamp.find;
+    let typing = find.focused;
+    let empty = find.query.is_empty();
+    let query = find.query.clone();
+    let text = &mut app.winamp.playlist_text;
+    if empty && !typing {
+        let hint = gettext(app.locale, "Search Spotify");
+        write(view, text, &hint, field, ink.gamma_multiply(0.5));
+    } else {
+        // Room for the caret after the text.
+        let shown = tail(text, &query, field.width.saturating_sub(2) as f32);
+        let width = if shown.is_empty() {
+            0
+        } else {
+            write(view, text, &shown, field, ink)
+        };
+        if typing && window_focused {
+            let time = view.ui.ctx().input(|input| input.time);
+            let half = BLINK.as_secs_f64();
+            if ((time / half) as u64).is_multiple_of(2) {
+                view.fill(field.x + width + 1, bar.y + 2, 1, bar.height - 4, ink);
+            }
+            let next = half - time % half;
+            view.ui
+                .ctx()
+                .request_repaint_after(Duration::from_secs_f64(next));
+        }
+    }
+
+    if !empty {
+        // A five-pixel X, a pixel at a time so it stays sharp at any scale.
+        let (x, y) = (cross.x + (ROW - 5) / 2, cross.y + (cross.height - 5) / 2);
+        for step in 0..5 {
+            view.fill(x + step, y + step, 1, 1, ink);
+            view.fill(x + 4 - step, y + step, 1, 1, ink);
+        }
+        if view.interact(cross, "find-clear", Sense::click()).clicked() {
+            let actions = app.winamp.find.set_query(String::new());
+            app.actions.extend(actions);
+            app.winamp.find_scroll = 0;
+            app.winamp.find.focused = true;
+        }
+    }
+}
+
+/// The modes for what the box holds, the one shown picked out in the
+/// playlist's selection colours.
+fn mode_row(app: &mut App, view: &mut View, row: Area) {
+    let style = view.skin.playlist.clone();
+    let gap = 8;
+    let mut x = row.x + 3;
+    let current = app.winamp.find.mode;
+    for &mode in app.winamp.find.modes() {
+        let label = mode.label();
+        let width = app.winamp.playlist_text.width(label).ceil() as u32;
+        let cell = Area::new(x - 2, row.y, width + 4, row.height);
+        if cell.x + cell.width > row.x + row.width {
+            break;
+        }
+        let picked = mode == current;
+        if picked {
+            view.fill(
+                cell.x,
+                cell.y,
+                cell.width,
+                cell.height,
+                rgb(style.selected_background),
+            );
+        }
+        let color = rgb(if picked { style.current } else { style.normal });
+        write(
+            view,
+            &mut app.winamp.playlist_text,
+            label,
+            Area::new(x, row.y, width, row.height),
+            color,
+        );
+        if view
+            .interact(cell, &format!("find-mode-{label}"), Sense::click())
+            .clicked()
+        {
+            app.winamp.find.set_mode(mode);
+            app.winamp.find_scroll = 0;
+        }
+        x += width + gap;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crate::model::Loadable;
+
+    fn test_app() -> App {
+        let root = std::env::temp_dir().join(format!(
+            "spotifast-find-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        App::new(
+            &crate::backend::Waker::default(),
+            crate::paths::AppDirs {
+                config: root.join("config"),
+                state: root.join("state"),
+                cache: root.join("cache"),
+            },
+            crate::settings::Settings::default(),
+            crate::app::AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+                autostart: false,
+            },
+        )
+    }
+
+    /// The demo's search for "Bonobo", answered.
+    fn searched_app() -> App {
+        let mut app = test_app();
+        crate::demo::populate(&mut app);
+        assert_eq!(app.search.committed, "Bonobo");
+        assert!(matches!(app.search.results, Loadable::Loaded(_)));
+        app
+    }
+
+    #[test]
+    fn an_answer_for_an_older_query_is_not_shown() {
+        let mut app = searched_app();
+        // Typed on past the query the answer is for: nothing was shown
+        // before, so nothing is shown now.
+        app.winamp.find.set_query("Bonobo live".into());
+        assert!(visible_rows(&app).is_empty());
+
+        // The answer for what the box holds is shown.
+        app.winamp.find.set_query("Bonobo".into());
+        let shown = visible_rows(&app);
+        assert!(!shown.is_empty());
+        assert!(shown.iter().all(|row| row.kind == state::ItemKind::Song));
+        hold_answer(&mut app);
+
+        // Typing on keeps those rows rather than emptying the list, and
+        // they never become another query's rows: the main window's search
+        // for something else changes nothing here.
+        app.winamp.find.set_query("Bonobo live".into());
+        assert_eq!(visible_rows(&app), shown);
+        app.search.committed = "Khruangbin".into();
+        assert_eq!(visible_rows(&app), shown);
+
+        // Emptying the box lets go of them.
+        app.winamp.find.set_query(String::new());
+        hold_answer(&mut app);
+        app.winamp.find.set_query("Bonobo live".into());
+        assert!(visible_rows(&app).is_empty());
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn choosing_a_song_plays_it_alone_and_queue_adds_it() {
+        let mut app = searched_app();
+        app.winamp.find.set_query("Bonobo".into());
+        let rows = visible_rows(&app);
+        app.actions.clear();
+        choose(&mut app, &rows[1]);
+        assert!(matches!(
+            app.actions.as_slice(),
+            [Action::PlayUris { uris, index: 0 }] if uris == &[rows[1].uri.clone()]
+        ));
+        app.actions.clear();
+        queue(&mut app, &rows[1]);
+        assert!(matches!(
+            app.actions.as_slice(),
+            [Action::AddToQueue { uri, .. }] if uri == &rows[1].uri
+        ));
+        app.backend.shutdown();
+    }
+    fn press(key: Key, modifiers: egui::Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// A frame of input through FIND, then the window's own keys.
+    fn frame(app: &mut App, ctx: &egui::Context, events: Vec<Event>) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                keys(app, ui.ctx());
+                crate::ui::keys::handle(app, ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn the_box_takes_typing_from_the_window_shortcuts_while_focused() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.settings.find_open = true;
+        let none = egui::Modifiers::NONE;
+        // Unfocused, M is the window's: mute.
+        frame(
+            &mut app,
+            &ctx,
+            vec![press(Key::M, none), Event::Text("m".into())],
+        );
+        assert!(matches!(app.actions.as_slice(), [Action::ToggleMute]));
+        assert!(app.winamp.find.query.is_empty());
+        app.actions.clear();
+
+        app.winamp.find.focus_requested = true;
+        frame(
+            &mut app,
+            &ctx,
+            vec![
+                press(Key::M, none),
+                Event::Text("m".into()),
+                press(Key::Space, none),
+                Event::Text(" ".into()),
+                Event::Paste("x\ny".into()),
+            ],
+        );
+        assert!(app.winamp.find.focused);
+        assert_eq!(app.winamp.find.query, "m x y");
+        assert_eq!(app.winamp.find.mode, state::FindMode::Songs);
+        assert!(app.actions.is_empty(), "{:?}", app.actions);
+
+        frame(&mut app, &ctx, vec![press(Key::Backspace, none)]);
+        assert_eq!(app.winamp.find.query, "m x ");
+        frame(&mut app, &ctx, vec![press(Key::Enter, none)]);
+        assert!(matches!(app.actions.as_slice(), [Action::FindSearch(q)] if q == "m x"));
+        app.actions.clear();
+
+        frame(
+            &mut app,
+            &ctx,
+            vec![press(Key::Backspace, egui::Modifiers::COMMAND)],
+        );
+        assert!(app.winamp.find.query.is_empty());
+        assert_eq!(app.winamp.find.mode, state::FindMode::Library);
+
+        // Escape gives the keys back to the window.
+        frame(&mut app, &ctx, vec![press(Key::Escape, none)]);
+        assert!(!app.winamp.find.focused);
+        frame(&mut app, &ctx, vec![press(Key::M, none)]);
+        assert!(matches!(app.actions.as_slice(), [Action::ToggleMute]));
+
+        // A closed FIND never holds the keyboard.
+        app.winamp.find.focused = true;
+        app.settings.find_open = false;
+        frame(&mut app, &ctx, vec![]);
+        assert!(!app.winamp.find.focused);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn arrows_walk_the_rows_and_enter_plays_the_selected_song() {
+        let ctx = egui::Context::default();
+        let mut app = searched_app();
+        app.settings.find_open = true;
+        let actions = app.winamp.find.set_query("Bonobo".into());
+        assert!(matches!(actions.as_slice(), [Action::FindSearch(_)]));
+        app.winamp.find.focused = true;
+        app.actions.clear();
+        let none = egui::Modifiers::NONE;
+        frame(
+            &mut app,
+            &ctx,
+            vec![press(Key::ArrowDown, none), press(Key::ArrowDown, none)],
+        );
+        assert_eq!(app.winamp.find.selected, Some(1));
+        frame(&mut app, &ctx, vec![press(Key::Enter, none)]);
+        let rows = visible_rows(&app);
+        assert!(matches!(
+            app.actions.as_slice(),
+            [Action::PlayUris { uris, index: 0 }] if uris == &[rows[1].uri.clone()]
+        ));
+        app.actions.clear();
+        frame(&mut app, &ctx, vec![press(Key::Tab, none)]);
+        assert_eq!(app.winamp.find.mode, state::FindMode::Artists);
+        assert_eq!(app.winamp.find.selected, None);
+        app.backend.shutdown();
+    }
+}

@@ -28,6 +28,7 @@ use crate::winamp::{MAX_SCALE, WinampState};
 use super::widgets::{SliderEvent, wheel_notches};
 
 mod equalizer;
+pub(crate) mod find;
 mod pixel_text;
 mod playlist;
 mod section;
@@ -356,6 +357,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     fit_window(&ctx, &app.settings, unit);
     let origin = ui.max_rect().min;
     let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
+    // FIND's box takes its typing before the window's single-key shortcuts.
+    find::keys(app, &ctx);
     super::keys::handle(app, &ctx);
     for path in dropped_skins(&ctx) {
         app.actions.push(Action::InstallSkin(path));
@@ -448,29 +451,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
 }
 
-/// One section under the playlist, in its frame. The bodies come with the
-/// sections themselves; until then FIND shows its empty list.
+/// One section under the playlist, in its frame. LYRICS and VIS bring
+/// their bodies with them.
 fn show_section(app: &mut App, view: &mut View, section: WinampSection, focused: bool) {
     let title = match section {
-        WinampSection::Find => "FIND",
+        WinampSection::Find => return find::show(app, view, focused),
         WinampSection::Lyrics => "LYRICS",
         WinampSection::Vis => "VIS",
     };
-    let Some(chrome) = section::frame(app, view, section, title, focused) else {
-        return;
-    };
-    if section == WinampSection::Find {
-        let winamp = &mut app.winamp;
-        section::list(
-            view,
-            &mut winamp.playlist_text,
-            &[],
-            &mut winamp.find_scroll,
-            &mut winamp.find_wheel,
-            section::list_area(chrome.height),
-            WinampSection::Find,
-        );
-    }
+    section::frame(app, view, section, title, focused);
 }
 
 /// The main window as it usually is. Returns whether the visualiser is

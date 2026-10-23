@@ -81,7 +81,7 @@ pub(super) fn frame(
     }
     let height = app.settings.section_height(section);
     let name = key(section);
-    top(view, title, focused);
+    top(app, view, title, focused);
     sides(view, section, height);
     bottom(view, section, height);
     let body = body_area(section, height);
@@ -139,7 +139,7 @@ fn cut(sprite: Sprite, dx: u32, dy: u32, width: u32, height: u32) -> Sprite {
 
 /// The title bar: the corners, title tiles between them where the
 /// playlist has its name, and the section's name on them.
-fn top(view: &View, title: &str, focused: bool) {
+fn top(app: &mut App, view: &mut View, title: &str, focused: bool) {
     use sprites::*;
     let (left, tile, right) = if focused {
         (
@@ -166,8 +166,11 @@ fn top(view: &View, title: &str, focused: bool) {
     let room = (run.width / 5) as usize;
     let label: String = label.chars().take(room).collect();
     let label_width = 5 * label.chars().count() as u32;
-    view.text(
+    write_name(
+        app,
+        view,
         &label,
+        true,
         Area::new(
             (width - label_width) / 2,
             (layout::PLAYLIST_TITLE_HEIGHT - 6) / 2,
@@ -175,6 +178,28 @@ fn top(view: &View, title: &str, focused: bool) {
             6,
         ),
     );
+}
+
+/// A section's name in the skin's font, or, when the font lacks one of
+/// its characters, in the playlist's face, as the playlist's shade bar
+/// writes a song. On the title bar the font's blank cells still clear the
+/// gap in the stripes, and the face is written over them.
+fn write_name(app: &mut App, view: &mut View, label: &str, blank: bool, area: Area) {
+    if label.chars().all(crate::skin::font::covered) {
+        view.text(label, area);
+        return;
+    }
+    let mut area = area;
+    if blank {
+        view.text(&" ".repeat(label.chars().count()), area);
+        area = Area::new(
+            area.x + 5,
+            area.y,
+            area.width.saturating_sub(10),
+            area.height,
+        );
+    }
+    super::pixel_line(app, view, label.trim(), area);
 }
 
 /// The side tiles, down to the bottom bar.
@@ -289,7 +314,13 @@ fn shade(app: &mut App, view: &mut View, section: WinampSection, title: &str, fo
             .ctx()
             .send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
-    view.text(title, Area::new(5, 4, width - 30 - 5 - 5, 6));
+    write_name(
+        app,
+        view,
+        title,
+        false,
+        Area::new(5, 4, width - 30 - 5 - 5, 6),
+    );
     if view
         .lamp_button(
             layout::PLAYLIST_SHADE,
@@ -375,10 +406,6 @@ fn button_spans(labels: &[&str]) -> Vec<Area> {
 
 /// Buttons along the bottom bar, their labels in the skin's font, a label
 /// a pixel lower while held. Returns the one clicked this frame.
-#[expect(
-    dead_code,
-    reason = "FIND draws its buttons with this from the next change on"
-)]
 pub(super) fn bottom_buttons(
     view: &mut View,
     height: u32,
