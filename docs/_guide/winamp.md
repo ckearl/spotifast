@@ -125,8 +125,10 @@ text. With the box empty it closes FIND.
 
 **LYR** shows the lyrics of the playing song. When the lyrics are synced, the
 current line is highlighted and the window follows it. Click a line to jump the
-song to that line. Scrolling pauses the following. If the lyrics could not be loaded, the window
-says so in a line you can click to try again.
+song to that line. Scrolling pauses the following; it starts again when you
+click a synced line, which also jumps there, or when the track changes. If the
+lyrics could not be loaded, the window says so in a line you can click to try
+again.
 
 ## VIS
 
