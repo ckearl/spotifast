@@ -100,6 +100,12 @@ not consume a queue row or restore an older queue saved on this computer.
    album. Clear queue and sign-out cancel an album still being fetched;
    changing playback devices asks you to add it again on the new device.
 
+   A playlist's **Add to queue** in the mini player works the same way: a
+   playlist whose songs are all loaded is added at once; otherwise its songs
+   are read page by page on their own, without moving the playlist page,
+   then added together. Offline or on a failed page it says it could not add
+   the playlist and adds none of it.
+
    On another device, a rate limit delays additions instead of dropping them.
    Spotifast retries automatically after Spotify's requested wait and keeps
    later songs behind the album. Pending rows retain their known titles and

@@ -199,6 +199,13 @@ pub enum ApiRequest {
         offset: u32,
         generation: u64,
     },
+    /// A page of a playlist read whole to queue it; the page on screen,
+    /// and whatever window of it is loaded, stay untouched.
+    PlaylistQueueItems {
+        id: String,
+        offset: u32,
+        request: u64,
+    },
     CreatePlaylist {
         name: String,
         public: bool,
@@ -461,6 +468,12 @@ pub enum ApiResponse {
     PlaylistSample {
         id: String,
         generation: u64,
+        result: ApiResult<Page<PlaylistItem>>,
+    },
+    PlaylistQueueItems {
+        id: String,
+        offset: u32,
+        request: u64,
         result: ApiResult<Page<PlaylistItem>>,
     },
     PlaylistCreated(ApiResult<Playlist>),
@@ -1345,6 +1358,7 @@ impl Backend {
         if matches!(
             request,
             ApiRequest::AlbumQueueTracks { .. }
+                | ApiRequest::PlaylistQueueItems { .. }
                 | ApiRequest::AddToQueue { .. }
                 | ApiRequest::AddManyToQueue { .. }
         ) {
@@ -4760,6 +4774,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         ApiRequest::Playlist { id, .. } => Operation::PlaylistMetadata(api.playlist_access(id)),
         ApiRequest::PlaylistItems { id, .. }
         | ApiRequest::PlaylistSample { id, .. }
+        | ApiRequest::PlaylistQueueItems { id, .. }
         | ApiRequest::CheckPlaylistDuplicates {
             playlist_id: id, ..
         } => Operation::PlaylistItems(api.playlist_access(id)),
@@ -4834,6 +4849,11 @@ fn observe_playlists(api: &ApiGateway, response: &ApiResponse) {
             ..
         }
         | ApiResponse::PlaylistSample {
+            id,
+            result: Err(error),
+            ..
+        }
+        | ApiResponse::PlaylistQueueItems {
             id,
             result: Err(error),
             ..
@@ -5335,6 +5355,16 @@ async fn handle(
             result: routed!(playlist_items(&id, offset, PLAYLIST_PAGE_SIZE)),
             id,
             generation,
+        },
+        ApiRequest::PlaylistQueueItems {
+            id,
+            offset,
+            request,
+        } => ApiResponse::PlaylistQueueItems {
+            result: routed!(playlist_items(&id, offset, PLAYLIST_PAGE_SIZE)),
+            id,
+            offset,
+            request,
         },
         ApiRequest::CreatePlaylist {
             name,
@@ -5884,6 +5914,10 @@ fn session_read(request: &ApiRequest) -> Option<SessionRead<'_>> {
             id,
             offset: *offset,
         },
+        ApiRequest::PlaylistQueueItems { id, offset, .. } => SessionRead::Rows {
+            id,
+            offset: *offset,
+        },
         ApiRequest::MyPlaylists { .. } => SessionRead::Library,
         _ => return None,
     })
@@ -5926,6 +5960,19 @@ fn session_response(request: &ApiRequest, answer: SessionAnswer) -> Option<ApiRe
             id: id.clone(),
             offset: *offset,
             generation: *generation,
+            result,
+        },
+        (
+            ApiRequest::PlaylistQueueItems {
+                id,
+                offset,
+                request,
+            },
+            SessionAnswer::Rows(result),
+        ) => ApiResponse::PlaylistQueueItems {
+            id: id.clone(),
+            offset: *offset,
+            request: *request,
             result,
         },
         (ApiRequest::PlaylistSample { id, generation, .. }, SessionAnswer::Rows(result)) => {
@@ -8987,6 +9034,19 @@ mod session_tests {
             Some(SessionRead::Sample {
                 id: "pl1",
                 offset: 150
+            })
+        );
+        // Queueing a playlist reads its rows as its page does.
+        let queue = ApiRequest::PlaylistQueueItems {
+            id: "pl1".into(),
+            offset: 100,
+            request: 3,
+        };
+        assert_eq!(
+            session_read(&queue),
+            Some(SessionRead::Rows {
+                id: "pl1",
+                offset: 100
             })
         );
         let duplicates = ApiRequest::CheckPlaylistDuplicates {

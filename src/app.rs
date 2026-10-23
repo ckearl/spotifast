@@ -206,11 +206,29 @@ struct PendingAlbumQueue {
     tracks: Vec<Track>,
 }
 
-/// A playlist asked to be queued whole while its page still loads: the
-/// songs join the queue once every page of it has come.
+/// A playlist asked to be queued whole, read page by page through its
+/// own requests: the songs join the queue once the last page has come.
 struct PendingPlaylistQueue {
+    id: String,
     label: String,
     target: Target,
+    offset: u32,
+    songs: Vec<(String, String)>,
+}
+
+/// A playlist row as the queue takes it: its URI and "who - what".
+fn queue_song(row: &PlaylistItem) -> Option<(String, String)> {
+    let item = row.playable()?;
+    if item.uri().is_empty() {
+        return None;
+    }
+    let subtitle = item.subtitle();
+    let label = if subtitle.is_empty() {
+        item.name().to_string()
+    } else {
+        format!("{subtitle} - {}", item.name())
+    };
+    Some((item.uri().to_string(), label))
 }
 
 struct PendingQueueAdd {
@@ -730,8 +748,9 @@ pub struct App {
     /// Queue additions shown before Spotify confirms them, with request time.
     pending_queue_adds: Vec<PendingQueueAdd>,
     pending_album_queues: HashMap<u64, PendingAlbumQueue>,
-    /// Playlists to queue, by id, once their pages have all loaded.
-    pending_playlist_queues: HashMap<String, PendingPlaylistQueue>,
+    /// Playlists being read to queue, by request.
+    pending_playlist_queues: HashMap<u64, PendingPlaylistQueue>,
+    playlist_queue_serial: u64,
     pending_queue_batches: HashMap<u64, Target>,
     album_queue_serial: u64,
     /// The latest `play-search` command. Its answer plays only while this
@@ -1283,6 +1302,7 @@ impl App {
             pending_queue_adds: Vec::new(),
             pending_album_queues: HashMap::new(),
             pending_playlist_queues: HashMap::new(),
+            playlist_queue_serial: 0,
             pending_queue_batches: HashMap::new(),
             album_queue_serial: 0,
             play_search_serial: 0,
@@ -7325,7 +7345,6 @@ impl App {
                 self.request_user_names(adders);
                 self.sample_playlist_tail(&id);
                 self.checkpoint_playlist_cache(&id);
-                self.continue_playlist_queue(&id);
                 // A sorted table means the whole list, not the loaded part.
                 if self.table_sorts.contains_key(&Page::Playlist(id.clone())) {
                     self.load_more(Page::Playlist(id));
@@ -8035,6 +8054,12 @@ impl App {
             } => {
                 self.receive_album_queue(request, offset, result);
             }
+            ApiResponse::PlaylistQueueItems {
+                request,
+                offset,
+                result,
+                ..
+            } => self.receive_playlist_queue(request, offset, result),
             ApiResponse::Show { id, result } => {
                 if let Ok(show) = &result
                     && let Some(image) = pick_image(&show.images, 64)
@@ -9638,80 +9663,111 @@ impl App {
     }
 
     /// Queues every song of a playlist, in order. Spotify queues songs, not
-    /// playlists, so the playlist's page is loaded to its end through the
-    /// usual page requests first; the notice shows at once.
+    /// playlists: a playlist held whole is queued at once; otherwise its
+    /// songs are read page by page through requests of its own, leaving
+    /// the page on screen and its loaded window alone, and the notice shows
+    /// at once. Each ask is its own: a second one is never swallowed.
     fn queue_playlist(&mut self, uri: String, label: String) {
         let Some(id) = util::uri_id(&uri).map(str::to_string) else {
             return;
         };
-        if self.pending_playlist_queues.contains_key(&id) {
+        if let Some(page) = self.playlist_pages.get(&id)
+            && page.items.is_complete()
+        {
+            let songs = page.items.items.iter().filter_map(queue_song).collect();
+            self.queue_many(songs);
             return;
         }
-        self.pending_playlist_queues.insert(
-            id.clone(),
-            PendingPlaylistQueue {
-                label: label.clone(),
-                target: self.target(),
-            },
-        );
-        let whole = self
-            .playlist_pages
-            .get(&id)
-            .is_some_and(|page| page.items.is_complete());
-        if !whole {
-            // Translators: {name} is an album name.
-            self.toast(gettext(self.locale, "Loading {name} to queue…").replace("{name}", &label));
-            self.ensure_loaded(Page::Playlist(id.clone()));
-        }
-        self.continue_playlist_queue(&id);
-    }
-
-    /// A page of a playlist waiting to be queued has come: ask for the
-    /// next, or queue the whole of it.
-    fn continue_playlist_queue(&mut self, id: &str) {
-        if !self.pending_playlist_queues.contains_key(id) {
-            return;
-        }
-        let Some(page) = self.playlist_pages.get(id) else {
-            return;
-        };
-        let items = &page.items;
-        if let Some(error) = items.error.clone() {
-            let pending = self.pending_playlist_queues.remove(id).unwrap();
+        if !self.is_connected() || !self.network_reachable {
             self.toast_error(
-                // Translators: {name} is an album name and {error} is an error message.
-                gettext(self.locale, "Couldn't add {name} to queue: {error}")
-                    .replace("{name}", &pending.label)
-                    .replace("{error}", &error),
+                // Translators: {name} is a playlist name.
+                gettext(self.locale, "Couldn't add {name} to queue: you're offline")
+                    .replace("{name}", &label),
             );
             return;
         }
-        if !items.is_complete() {
-            if items.loaded_once && !items.loading {
-                self.load_more(Page::Playlist(id.to_string()));
-            }
+        self.playlist_queue_serial = self.playlist_queue_serial.wrapping_add(1);
+        let request = self.playlist_queue_serial;
+        self.pending_playlist_queues.insert(
+            request,
+            PendingPlaylistQueue {
+                id: id.clone(),
+                label: label.clone(),
+                target: self.target(),
+                offset: 0,
+                songs: Vec::new(),
+            },
+        );
+        self.backend.api(ApiRequest::PlaylistQueueItems {
+            id,
+            offset: 0,
+            request,
+        });
+        self.toast(gettext(self.locale, "Loading {name} to queue…").replace("{name}", &label));
+    }
+
+    /// A page of a playlist being read to queue: ask for the next, or
+    /// queue it all; any failure ends the ask with a notice, adding none.
+    fn receive_playlist_queue(
+        &mut self,
+        request: u64,
+        offset: u32,
+        result: crate::api::client::Result<crate::api::models::Page<PlaylistItem>>,
+    ) {
+        if self
+            .pending_playlist_queues
+            .get(&request)
+            .is_none_or(|pending| pending.offset != offset)
+        {
             return;
         }
-        let songs: Vec<(String, String)> = items
-            .items
-            .iter()
-            .filter_map(|entry| entry.playable())
-            .filter(|item| !item.uri().is_empty())
-            .map(|item| {
-                let subtitle = item.subtitle();
-                let label = if subtitle.is_empty() {
-                    item.name().to_string()
-                } else {
-                    format!("{subtitle} - {}", item.name())
-                };
-                (item.uri().to_string(), label)
-            })
-            .collect();
-        let pending = self.pending_playlist_queues.remove(id).unwrap();
+        let mut pending = self.pending_playlist_queues.remove(&request).unwrap();
+        let failed = |app: &mut App, why: String| {
+            app.toast_error(
+                // Translators: {name} is a playlist name and {error} is an error message.
+                gettext(app.locale, "Couldn't add {name} to queue: {error}")
+                    .replace("{name}", &pending.label)
+                    .replace("{error}", &why),
+            );
+        };
         if pending.target != self.target() {
+            self.toast_error(gettext(
+                self.locale,
+                "Playback device changed. Add the playlist to queue again",
+            ));
             return;
         }
-        self.queue_many(songs);
+        let out_of_order = || gettext(self.locale, "its songs did not load in order").into_owned();
+        let page = match result {
+            Ok(page) if page.offset == offset => page,
+            Ok(_) => return failed(self, out_of_order()),
+            Err(error) => return failed(self, error.to_string()),
+        };
+        let next = page.next_offset();
+        if page.next.is_some() && next.is_none_or(|next| next <= offset) {
+            return failed(self, out_of_order());
+        }
+        pending
+            .songs
+            .extend(page.items.iter().filter_map(queue_song));
+        match next {
+            Some(next) => {
+                pending.offset = next;
+                self.backend.api(ApiRequest::PlaylistQueueItems {
+                    id: pending.id.clone(),
+                    offset: next,
+                    request,
+                });
+                self.pending_playlist_queues.insert(request, pending);
+            }
+            None if pending.songs.is_empty() => {
+                self.toast_error(gettext(
+                    self.locale,
+                    "This playlist has no playable songs to queue",
+                ));
+            }
+            None => self.queue_many(pending.songs),
+        }
     }
 
     fn receive_album_queue(
@@ -17564,13 +17620,60 @@ mod tests {
         }
     }
 
-    /// A playlist longer than its first page is queued whole: the notice
-    /// shows at once, the rest of its pages are asked for in turn, and
-    /// every song joins the queue in order once the last has come.
-    #[test]
-    fn queue_playlist_loads_every_page_then_queues_them_all() {
-        let mut app = test_app("playlist-queue-pages");
+    fn playlist_queue_row(id: &str) -> PlaylistItem {
+        PlaylistItem {
+            item: Some(PlayableItem::Track(album_queue_track(id))),
+            ..Default::default()
+        }
+    }
+
+    fn playlist_queue_page(
+        ids: &[&str],
+        offset: u32,
+        more: bool,
+    ) -> crate::api::models::Page<PlaylistItem> {
+        crate::api::models::Page {
+            items: ids.iter().map(|id| playlist_queue_row(id)).collect(),
+            offset,
+            limit: 2,
+            total: 3,
+            next: more.then(|| "next".into()),
+        }
+    }
+
+    /// The playlist-queue requests sent since last asked, as (id, offset,
+    /// request).
+    fn playlist_queue_requests(app: &App) -> Vec<(String, u32, u64)> {
+        app.backend
+            .take_queue_requests()
+            .into_iter()
+            .filter_map(|request| match request {
+                ApiRequest::PlaylistQueueItems {
+                    id,
+                    offset,
+                    request,
+                } => Some((id, offset, request)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn connected_queue_app(name: &str) -> App {
+        let mut app = test_app(name);
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
         app.queue = loaded_queue("spotify:track:current", &["spotify:track:context"]);
+        app
+    }
+
+    /// A playlist is read whole through requests of its own, so no state
+    /// of its page can hold the ask up: a window scrolled into the middle
+    /// of it, or edits still on their way. The notice shows at once and
+    /// every song joins the queue, in order, once the last page has come.
+    #[test]
+    fn queue_playlist_reads_it_whole_whatever_its_page_holds() {
+        let mut app = connected_queue_app("playlist-queue-pages");
         app.playlist_pages.insert(
             "pl".into(),
             PlaylistPage {
@@ -17581,43 +17684,49 @@ mod tests {
                 ..Default::default()
             },
         );
-        let row = |id: &str| PlaylistItem {
-            item: Some(PlayableItem::Track(album_queue_track(id))),
-            ..Default::default()
-        };
-        app.handle_api(ApiResponse::PlaylistItems {
-            id: "pl".into(),
-            offset: 0,
-            generation: 0,
-            result: Ok(crate::api::models::Page {
-                items: vec![row("one"), row("two")],
-                offset: 0,
-                limit: 2,
-                total: 3,
-                next: Some("next".into()),
-            }),
-        });
-        app.backend.take_playlist_item_requests();
+        {
+            // (a) The big window's scrollbar jumped into the middle: a
+            // window that starts past the top. (b) An edit is on its way.
+            let page = app.playlist_pages.get_mut("pl").unwrap();
+            page.items.base_offset = 100;
+            page.items.loaded_once = true;
+            page.items.next_offset = Some(150);
+            page.items.items = vec![playlist_queue_row("window")];
+            page.pending_writes = 1;
+        }
         let toasts = app.toasts.len();
         app.add_to_queue("spotify:playlist:pl".into(), "Mix".into());
         assert_eq!(app.toasts.len(), toasts + 1, "the notice shows at once");
         assert!(app.toasts.last().unwrap().message.contains("Mix"));
+        let requests = playlist_queue_requests(&app);
+        let [(id, 0, request)] = requests.as_slice() else {
+            panic!("{requests:?}");
+        };
+        assert_eq!(id, "pl");
+        let request = *request;
+        app.handle_api(ApiResponse::PlaylistQueueItems {
+            id: "pl".into(),
+            offset: 0,
+            request,
+            result: Ok(playlist_queue_page(&["one", "two"], 0, true)),
+        });
         assert_eq!(queue_uris(&app).1, ["spotify:track:context"]);
         assert_eq!(
-            app.backend.take_playlist_item_requests(),
-            [("pl".to_string(), 2, 0)]
+            playlist_queue_requests(&app),
+            [("pl".to_string(), 2, request)]
         );
-        app.handle_api(ApiResponse::PlaylistItems {
+        // An answer for a page already read changes nothing.
+        app.handle_api(ApiResponse::PlaylistQueueItems {
+            id: "pl".into(),
+            offset: 0,
+            request,
+            result: Ok(playlist_queue_page(&["one", "two"], 0, true)),
+        });
+        app.handle_api(ApiResponse::PlaylistQueueItems {
             id: "pl".into(),
             offset: 2,
-            generation: 0,
-            result: Ok(crate::api::models::Page {
-                items: vec![row("three")],
-                offset: 2,
-                limit: 2,
-                total: 3,
-                next: None,
-            }),
+            request,
+            result: Ok(playlist_queue_page(&["three"], 2, false)),
         });
         assert_eq!(
             queue_uris(&app).1,
@@ -17628,6 +17737,75 @@ mod tests {
                 "spotify:track:context"
             ]
         );
+        assert!(app.pending_playlist_queues.is_empty());
+        let page = &app.playlist_pages["pl"];
+        assert_eq!(
+            page.items.base_offset, 100,
+            "the page's window is left alone"
+        );
+        assert_eq!(page.items.items.len(), 1);
+        app.backend.shutdown();
+    }
+
+    /// (c) Offline, the ask ends at once with a notice saying so, rather
+    /// than promising songs that cannot come.
+    #[test]
+    fn queue_playlist_offline_says_it_could_not() {
+        let mut app = test_app("playlist-queue-offline");
+        app.queue = loaded_queue("spotify:track:current", &["spotify:track:context"]);
+        app.add_to_queue("spotify:playlist:pl".into(), "Mix".into());
+        assert!(playlist_queue_requests(&app).is_empty());
+        let toast = app.toasts.last().unwrap();
+        assert!(matches!(toast.kind, ToastKind::Error));
+        assert!(toast.message.contains("Mix"), "{}", toast.message);
+        assert!(app.pending_playlist_queues.is_empty());
+
+        let mut app = connected_queue_app("playlist-queue-unreachable");
+        app.network_reachable = false;
+        app.add_to_queue("spotify:playlist:pl".into(), "Mix".into());
+        assert!(playlist_queue_requests(&app).is_empty());
+        assert!(matches!(app.toasts.last().unwrap().kind, ToastKind::Error));
+        app.backend.shutdown();
+    }
+
+    /// Every ask ends: a second ask for the same playlist is its own; a
+    /// failed page ends it with a notice and adds nothing; a change of
+    /// device asks for it again, in words that fit a playlist.
+    #[test]
+    fn every_playlist_queue_ask_ends_queued_or_with_a_notice() {
+        let mut app = connected_queue_app("playlist-queue-ends");
+        app.add_to_queue("spotify:playlist:pl".into(), "Mix".into());
+        app.add_to_queue("spotify:playlist:pl".into(), "Mix".into());
+        let requests = playlist_queue_requests(&app);
+        assert_eq!(requests.len(), 2, "the second ask is not swallowed");
+        let (first, second) = (requests[0].2, requests[1].2);
+        assert_ne!(first, second);
+
+        app.handle_api(ApiResponse::PlaylistQueueItems {
+            id: "pl".into(),
+            offset: 0,
+            request: first,
+            result: Err(crate::api::client::ApiError::Network("down".into())),
+        });
+        let toast = app.toasts.last().unwrap();
+        assert!(matches!(toast.kind, ToastKind::Error));
+        assert!(toast.message.contains("Mix"), "{}", toast.message);
+        assert_eq!(queue_uris(&app).1, ["spotify:track:context"]);
+
+        app.selected_device = Some("kitchen".into());
+        app.handle_api(ApiResponse::PlaylistQueueItems {
+            id: "pl".into(),
+            offset: 0,
+            request: second,
+            result: Ok(playlist_queue_page(&["one"], 0, false)),
+        });
+        let toast = app.toasts.last().unwrap();
+        assert!(matches!(toast.kind, ToastKind::Error));
+        assert_eq!(
+            toast.message,
+            "Playback device changed. Add the playlist to queue again"
+        );
+        assert_eq!(queue_uris(&app).1, ["spotify:track:context"]);
         assert!(app.pending_playlist_queues.is_empty());
         app.backend.shutdown();
     }
