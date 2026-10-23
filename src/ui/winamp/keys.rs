@@ -193,7 +193,12 @@ pub(super) fn handle(app: &mut App, ctx: &egui::Context) {
                     return true;
                 }
                 let typed = character(*key, modifiers.shift);
-                // A verb waiting takes the next key, whatever it is.
+                // Any key but a letter ends a waiting verb and then does
+                // its own job: Space plays, / focuses FIND (R16). A letter
+                // the verb has no use for is swallowed.
+                if !typed.is_some_and(|key| key.is_ascii_alphabetic()) {
+                    keys.pending = None;
+                }
                 if keys.pending.is_none() && !typed.is_some_and(Sequencer::starts) {
                     return true;
                 }
@@ -206,6 +211,14 @@ pub(super) fn handle(app: &mut App, ctx: &egui::Context) {
         });
         if let Some(wait) = keys.wait(now) {
             ctx.request_repaint_after(wait);
+        }
+        // Esc steps out of FIND before the window's Esc sees it, unless a
+        // menu is open for it to close.
+        if !egui::Popup::is_any_open(ctx)
+            && ctx.input(|input| input.key_pressed(Key::Escape))
+            && find::escape(app)
+        {
+            ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
         }
     }
     for command in commands {
@@ -863,8 +876,11 @@ mod tests {
         app.backend.shutdown();
     }
 
+    /// R15: Esc in the box lets go and keeps the query; then it empties
+    /// the box; then it closes FIND. The window's Esc never sees those,
+    /// and has it back once FIND is closed.
     #[test]
-    fn escape_empties_the_box_then_closes_find() {
+    fn escape_lets_go_then_empties_the_box_then_closes_find() {
         let ctx = egui::Context::default();
         let mut app = test_app();
         app.settings.find_open = true;
@@ -872,20 +888,137 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         frame(&mut app, &ctx, typed(Key::X, "x"));
         assert_eq!(app.winamp.find.query, "x");
+        // The window's Esc would close the devices list.
+        app.show_devices = true;
+        app.actions.clear();
+
+        frame(&mut app, &ctx, typed(Key::Escape, ""));
+        assert!(!app.winamp.find.focused, "the first Esc lets go");
+        assert_eq!(app.winamp.find.query, "x", "and keeps the query");
+        assert!(app.actions.is_empty(), "{:?}", app.actions);
+
+        frame(&mut app, &ctx, typed(Key::Escape, ""));
+        assert!(app.winamp.find.query.is_empty(), "the second empties it");
+        assert!(
+            !app.actions
+                .iter()
+                .any(|action| matches!(action, Action::ToggleWinampSection(_))),
+            "{:?}",
+            app.actions
+        );
+
+        frame(&mut app, &ctx, typed(Key::Escape, ""));
+        assert!(
+            matches!(
+                app.actions.last(),
+                Some(Action::ToggleWinampSection(WinampSection::Find))
+            ),
+            "the third closes FIND: {:?}",
+            app.actions
+        );
+        assert!(app.show_devices, "FIND's Esc is not the window's too");
+
+        // FIND closed: Esc is the window's again.
+        app.settings.find_open = false;
         app.actions.clear();
         frame(&mut app, &ctx, typed(Key::Escape, ""));
-        assert!(app.winamp.find.query.is_empty());
-        assert!(
-            app.winamp.find.focused,
-            "the first Esc only empties the box"
-        );
         assert!(app.actions.is_empty(), "{:?}", app.actions);
-        frame(&mut app, &ctx, typed(Key::Escape, ""));
-        assert!(!app.winamp.find.focused);
-        assert!(matches!(
-            app.actions.as_slice(),
-            [Action::ToggleWinampSection(WinampSection::Find)]
-        ));
+        assert!(!app.show_devices);
+        app.backend.shutdown();
+    }
+
+    fn queued(app: &App) -> Vec<String> {
+        app.actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::AddToQueue { uri, .. } => Some(uri.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Without the mouse: type a search, Esc out of the box, and `a q`
+    /// queues the first result, or the one the arrows picked.
+    #[test]
+    fn a_search_typed_then_escaped_is_what_the_keys_act_on() {
+        let ctx = egui::Context::default();
+        for downs in [0usize, 2] {
+            let mut app = test_app();
+            app.settings.find_open = true;
+            app.winamp.find.focus_requested = true;
+            frame(&mut app, &ctx, vec![]);
+            // The demo's search for "Bonobo" is answered.
+            frame(&mut app, &ctx, vec![Event::Text("Bonobo".into())]);
+            let rows = super::super::find::visible_rows(&app);
+            assert!(rows.len() > 2, "the demo's answer");
+            for _ in 0..downs {
+                frame(&mut app, &ctx, typed(Key::ArrowDown, ""));
+            }
+            frame(&mut app, &ctx, typed(Key::Escape, ""));
+            assert!(!app.winamp.find.focused);
+            assert_eq!(app.winamp.find.query, "Bonobo");
+            app.actions.clear();
+            sequence(&mut app, &ctx, Key::A, Key::Q);
+            let picked = downs.saturating_sub(1);
+            assert_eq!(queued(&app), [rows[picked].uri.clone()], "{downs} downs");
+            app.backend.shutdown();
+        }
+    }
+
+    /// R16: a key that is not a letter ends a waiting verb and does its
+    /// own job.
+    #[test]
+    fn a_key_that_is_not_a_letter_ends_the_verb_and_does_its_job() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        frame(&mut app, &ctx, typed(Key::G, "g"));
+        assert_eq!(app.winamp.keys.pending_label(), Some("g…"));
+        frame(&mut app, &ctx, typed(Key::Space, " "));
+        assert_eq!(app.winamp.keys.pending_label(), None);
+        assert!(
+            matches!(app.actions.as_slice(), [Action::TogglePlay]),
+            "{:?}",
+            app.actions
+        );
+
+        app.actions.clear();
+        frame(&mut app, &ctx, typed(Key::A, "a"));
+        frame(&mut app, &ctx, typed(Key::Slash, "/"));
+        assert_eq!(app.winamp.keys.pending_label(), None);
+        assert!(app.winamp.find.focus_requested, "/ focuses FIND");
+        app.backend.shutdown();
+    }
+
+    /// A verb waiting when FIND's box takes the keyboard never turns what
+    /// is typed next into a command.
+    #[test]
+    fn a_letter_typed_into_the_box_never_ends_a_waiting_verb() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.settings.find_open = true;
+        frame(&mut app, &ctx, typed(Key::G, "g"));
+        assert_eq!(app.winamp.keys.pending_label(), Some("g…"));
+        frame(
+            &mut app,
+            &ctx,
+            vec![Event::Key {
+                key: Key::F,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::COMMAND,
+            }],
+        );
+        assert!(app.winamp.find.focus_requested);
+        frame(&mut app, &ctx, typed(Key::A, "a"));
+        assert!(app.winamp.find.focused);
+        assert_eq!(app.winamp.find.query, "a");
+        assert_eq!(app.winamp.keys.pending_label(), None);
+        assert!(app.actions.is_empty(), "no g a: {:?}", app.actions);
+        assert_eq!(
+            app.winamp.find.page(),
+            &super::super::find::state::FindPage::Top
+        );
         app.backend.shutdown();
     }
 }

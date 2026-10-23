@@ -762,6 +762,24 @@ pub(super) fn selected_row(app: &App) -> Option<(FindRow, Option<RowContext>)> {
     Some((row, row_context(app)))
 }
 
+/// Esc while FIND is shown and its box is not focused: a box with text
+/// is emptied, and an empty one closes FIND (R15). False when FIND is not
+/// shown, for Esc to keep the window's meaning.
+pub(super) fn escape(app: &mut App) -> bool {
+    if !open(app) {
+        return false;
+    }
+    if app.winamp.find.query.is_empty() {
+        app.actions
+            .push(Action::ToggleWinampSection(WinampSection::Find));
+    } else {
+        let actions = app.winamp.find.set_query(String::new());
+        app.actions.extend(actions);
+        app.winamp.find_scroll = 0;
+    }
+    true
+}
+
 /// Picks the `index`th row, which the keys then act on.
 fn select(app: &mut App, index: usize) {
     let winamp = &mut app.winamp;
@@ -861,17 +879,14 @@ fn key(app: &mut App, event: Event, now: Instant) {
                     choose(app, &rows, index);
                 }
             }
-            // Esc empties the box; in an empty box it closes FIND.
-            Key::Escape if !app.winamp.find.query.is_empty() => {
-                let actions = app.winamp.find.set_query(String::new());
-                app.actions.extend(actions);
-                app.winamp.find_scroll = 0;
-            }
+            // Esc lets go of the keyboard and keeps the query and its
+            // rows, picking the first when none is, so the mini player's
+            // keys act on a result (R15).
             Key::Escape => {
                 app.winamp.find.focused = false;
-                if app.settings.section_open(WinampSection::Find) {
-                    app.actions
-                        .push(Action::ToggleWinampSection(WinampSection::Find));
+                if app.winamp.find.selected.is_none() && !visible_rows(app).is_empty() {
+                    select(app, 0);
+                    reveal(app, 0);
                 }
             }
             Key::ArrowDown => step(app, 1),
@@ -1373,15 +1388,11 @@ mod tests {
             "the kind stays, now listing Liked Songs"
         );
 
-        // Escape in the emptied box closes FIND and gives the keys back
-        // to the window.
+        // Escape gives the keys back to the window, closing nothing
+        // (R15).
         frame(&mut app, &ctx, vec![press(Key::Escape, none)]);
         assert!(!app.winamp.find.focused);
-        assert!(matches!(
-            app.actions.as_slice(),
-            [Action::ToggleWinampSection(WinampSection::Find)]
-        ));
-        app.actions.clear();
+        assert!(app.actions.is_empty(), "{:?}", app.actions);
         frame(&mut app, &ctx, vec![press(Key::M, none)]);
         assert!(matches!(app.actions.as_slice(), [Action::ToggleMute]));
 
