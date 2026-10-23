@@ -1446,7 +1446,9 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 let find = &mut app.winamp.find;
                 let _ = find.set_query(app.search.committed.clone());
                 if let Loadable::Loaded(results) = &app.search.results {
-                    find.held = Some((app.search.results_serial, results.clone()));
+                    let serial = app.search.serial;
+                    let mode = find.mode;
+                    find.held.take(serial, results, true, true, mode);
                 }
                 find.selected = Some(2);
                 find.focused = true;

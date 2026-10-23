@@ -112,9 +112,48 @@ pub struct FindState {
     pub focus_requested: bool,
     /// When the box last changed with its search still to run.
     pub pending: Option<Instant>,
-    /// The last answer shown, with the serial it came with: kept on screen
-    /// while the answer for what the box now holds is on its way.
-    pub held: Option<(u64, SearchResults)>,
+    /// The last answer shown, kept on screen while the answer for what
+    /// the box now holds is on its way.
+    pub held: Held,
+}
+
+/// The last answer that came for what the box held, kind by kind: a
+/// search arrives in two halves, the catalogue (songs, artists, albums)
+/// and the playlists, either first, and each half replaces only its own.
+#[derive(Debug, Default)]
+pub struct Held {
+    pub results: SearchResults,
+    /// The search each half came from.
+    pub catalogue: Option<u64>,
+    pub lists: Option<u64>,
+}
+
+impl Held {
+    /// Takes the half of `results` that search `serial` has delivered.
+    /// Returns whether the rows of `mode` changed.
+    pub fn take(
+        &mut self,
+        serial: u64,
+        results: &SearchResults,
+        catalogue: bool,
+        lists: bool,
+        mode: FindMode,
+    ) -> bool {
+        let mut changed = false;
+        if catalogue && self.catalogue != Some(serial) {
+            self.results.tracks.clone_from(&results.tracks);
+            self.results.artists.clone_from(&results.artists);
+            self.results.albums.clone_from(&results.albums);
+            self.catalogue = Some(serial);
+            changed |= mode != FindMode::Lists;
+        }
+        if lists && self.lists != Some(serial) {
+            self.results.playlists.clone_from(&results.playlists);
+            self.lists = Some(serial);
+            changed |= mode == FindMode::Lists;
+        }
+        changed
+    }
 }
 
 impl Default for FindState {
@@ -127,7 +166,7 @@ impl Default for FindState {
             focused: false,
             focus_requested: false,
             pending: None,
-            held: None,
+            held: Held::default(),
         }
     }
 }
@@ -174,7 +213,7 @@ impl FindState {
             if !EMPTY_MODES.contains(&self.mode) {
                 self.mode = FindMode::Library;
             }
-            self.held = None;
+            self.held = Held::default();
         } else if !self.mode.is_search() {
             self.mode = FindMode::Songs;
         }
