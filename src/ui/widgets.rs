@@ -769,7 +769,7 @@ pub fn picked_menu(
     add_to_playlist_menu(ui, app, songs);
 }
 
-fn add_to_playlist_menu(ui: &mut Ui, app: &mut App, items: &[PlayableItem]) {
+pub(crate) fn add_to_playlist_menu(ui: &mut Ui, app: &mut App, items: &[PlayableItem]) {
     let query_id = ui.make_persistent_id("add-to-playlist-query");
     let palette = app.palette;
     let opened = menu_submenu_with_field(
@@ -777,23 +777,32 @@ fn add_to_playlist_menu(ui: &mut Ui, app: &mut App, items: &[PlayableItem]) {
         &palette,
         Some(Icon::ListPlus),
         &gettext(app.locale, "Add to playlist"),
-        |ui| {
-            let frame = ui.ctx().cumulative_frame_nr();
-            let previous = ui
-                .data(|data| data.get_temp::<(u64, String)>(query_id))
-                .filter(|(last_frame, _)| frame.saturating_sub(*last_frame) <= 1);
-            let fresh = previous.is_none();
-            let mut query = previous.map(|(_, query)| query).unwrap_or_default();
-            let field = playlist_picker(ui, app, items, &mut query);
-            if fresh {
-                field.request_focus();
-            }
-            ui.data_mut(|data| data.insert_temp(query_id, (frame, query)));
-        },
+        |ui| kept_playlist_picker(ui, app, items, query_id),
     );
     if opened.is_none() {
         ui.data_mut(|data| data.remove::<(u64, String)>(query_id));
     }
+}
+
+/// [`playlist_picker`] with its filter kept under `query_id` while it is
+/// drawn frame after frame, and the field focused when it first shows.
+pub(crate) fn kept_playlist_picker(
+    ui: &mut Ui,
+    app: &mut App,
+    items: &[PlayableItem],
+    query_id: egui::Id,
+) {
+    let frame = ui.ctx().cumulative_frame_nr();
+    let previous = ui
+        .data(|data| data.get_temp::<(u64, String)>(query_id))
+        .filter(|(last_frame, _)| frame.saturating_sub(*last_frame) <= 1);
+    let fresh = previous.is_none();
+    let mut query = previous.map(|(_, query)| query).unwrap_or_default();
+    let field = playlist_picker(ui, app, items, &mut query);
+    if fresh {
+        field.request_focus();
+    }
+    ui.data_mut(|data| data.insert_temp(query_id, (frame, query)));
 }
 
 /// Shared by single-item and selection menus. Filtering is local and keeps
@@ -806,8 +815,10 @@ pub(crate) fn playlist_picker(
 ) -> egui::Response {
     let palette = app.palette;
     let locale = app.locale;
-    ui.set_min_width(220.0);
-    ui.set_max_width(300.0);
+    // Never wider than the window, which the mini player's is not by much.
+    let room = (ui.ctx().content_rect().width() - 24.0).max(160.0);
+    ui.set_min_width(room.min(220.0));
+    ui.set_max_width(room.min(300.0));
     let width = ui.available_width();
     let field_id = ui.make_persistent_id("playlist-filter");
     let highlight_id = ui.make_persistent_id("playlist-highlight");

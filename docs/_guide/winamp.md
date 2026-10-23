@@ -69,6 +69,10 @@ music playing on this computer.
 by the queue. Double-click a song to play it, Ctrl-click to select several, and
 drag the lower-right corner to resize the window. Use X or **PL** to close it.
 
+Right-click a song to play it, queue it, add it to a playlist, like it, go to
+its artist or album, start its radio, or copy its link. Its artist, album and
+radio open in the mini player's search, not the main window.
+
 - **ADD** opens search or Liked Songs.
 - **SEL** selects rows.
 - **MISC** opens song, artist, and album pages.

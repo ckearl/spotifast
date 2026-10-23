@@ -16,12 +16,17 @@ use crate::skin::sprites;
 use crate::util;
 
 use super::View;
+use super::find::state::{FindRow, ItemKind};
+use super::item_menu;
 use super::section::{fit, list_area, wheel_rows};
 
 /// One line of the list.
 struct Row {
     uri: String,
     label: String,
+    /// The song's own name and its artists, which `label` numbers.
+    name: String,
+    subtitle: String,
     duration_ms: u32,
     current: bool,
     /// Where the song sits in the queue, when it is queued rather than on.
@@ -283,6 +288,8 @@ fn rows(app: &App, now: Option<&NowPlaying>) -> (Vec<Row>, Vec<String>) {
         rows.push(Row {
             uri: item.uri().to_string(),
             label: label(1, &item.subtitle(), item.name()),
+            name: item.name().to_string(),
+            subtitle: item.subtitle(),
             duration_ms: item.duration_ms(),
             current: true,
             queued: None,
@@ -293,6 +300,8 @@ fn rows(app: &App, now: Option<&NowPlaying>) -> (Vec<Row>, Vec<String>) {
         rows.push(Row {
             uri: now.uri.clone(),
             label: label(1, &now.subtitle, &now.title),
+            name: now.title.clone(),
+            subtitle: now.subtitle.clone(),
             duration_ms: now.duration_ms,
             current: true,
             queued: None,
@@ -312,6 +321,8 @@ fn rows(app: &App, now: Option<&NowPlaying>) -> (Vec<Row>, Vec<String>) {
         rows.push(Row {
             uri: item.uri().to_string(),
             label: label(rows.len() + 1, &item.subtitle(), item.name()),
+            name: item.name().to_string(),
+            subtitle: item.subtitle(),
             duration_ms: item.duration_ms(),
             current: false,
             queued: Some(index),
@@ -321,6 +332,26 @@ fn rows(app: &App, now: Option<&NowPlaying>) -> (Vec<Row>, Vec<String>) {
     }
     let uris = queued.iter().map(|item| item.uri().to_string()).collect();
     (rows, uris)
+}
+
+/// A line as FIND has it, for the actions every list shares.
+fn item_row(row: &Row) -> FindRow {
+    FindRow {
+        uri: row.uri.clone(),
+        label: super::find::state::by(&row.subtitle, &row.name),
+        name: row.name.clone(),
+        duration_ms: Some(row.duration_ms),
+        kind: ItemKind::Song,
+        album_uri: row
+            .album_id
+            .as_ref()
+            .map(|id| format!("spotify:album:{id}")),
+        artist_uri: row
+            .artist_id
+            .as_ref()
+            .map(|id| format!("spotify:artist:{id}")),
+        context: None,
+    }
 }
 
 fn label(number: usize, subtitle: &str, title: &str) -> String {
@@ -377,6 +408,7 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
     let clip = view.rect(area).intersect(view.ui.clip_rect());
     let painter = view.ui.painter().with_clip_rect(clip);
     let pad = 3;
+    let mut opened = None;
     for (offset, row) in rows.iter().skip(scroll).take(visible).enumerate() {
         let line = Area::new(
             area.x,
@@ -405,6 +437,17 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
                 selection.clear();
                 selection.insert(index);
             }
+        }
+        // A right-click picks the row, unless it is already among those
+        // picked, and opens its actions.
+        if response.secondary_clicked() {
+            let index = scroll + offset;
+            let selection = &mut app.winamp.playlist_selection;
+            if !selection.contains(&index) {
+                selection.clear();
+                selection.insert(index);
+            }
+            opened = Some((item_row(row), None));
         }
         if response.double_clicked()
             && let Some(index) = row.queued
@@ -456,6 +499,7 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
             color,
         );
     }
+    item_menu::context_menu(app, view, "playlist", opened);
 }
 
 /// The handle in the right-hand tiles, dragged to scroll.
@@ -803,6 +847,98 @@ mod tests {
             ]
         ));
         assert!(app.winamp.find.focus_requested);
+        app.backend.shutdown();
+    }
+
+    /// A right-click on a row picks it and opens the same actions as
+    /// FIND's, for the song on that row.
+    #[test]
+    fn a_right_click_opens_the_songs_actions() {
+        let root =
+            std::env::temp_dir().join(format!("spotifast-winamp-menu-{}", std::process::id()));
+        let mut app = App::new(
+            &crate::backend::Waker::default(),
+            crate::paths::AppDirs {
+                config: root.join("config"),
+                state: root.join("state"),
+                cache: root.join("cache"),
+            },
+            crate::settings::Settings::default(),
+            crate::app::AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+                autostart: false,
+            },
+        );
+        let row = |n: usize| Row {
+            uri: format!("spotify:track:t{n}"),
+            label: label(n + 1, "Bonobo", "Kerala"),
+            name: "Kerala".into(),
+            subtitle: "Bonobo".into(),
+            duration_ms: 1000,
+            current: n == 0,
+            queued: (n > 0).then(|| n - 1),
+            album_id: Some("a".into()),
+            artist_id: Some("b".into()),
+        };
+        let rows = [row(0), row(1), row(2)];
+        let item = item_row(&rows[1]);
+        assert_eq!(item.uri, "spotify:track:t1");
+        assert_eq!(item.label, "Bonobo - Kerala");
+        assert_eq!(item.album_uri.as_deref(), Some("spotify:album:a"));
+        assert_eq!(item.artist_uri.as_deref(), Some("spotify:artist:b"));
+
+        let ctx = egui::Context::default();
+        let skin = app.winamp.skin.clone();
+        let textures = std::collections::HashMap::new();
+        let height = 174;
+        let area = list_area(height);
+        let pos = egui::pos2(
+            (area.x + 20) as f32,
+            (area.y + layout::PLAYLIST_TRACK_HEIGHT + 3) as f32,
+        );
+        for events in [
+            vec![egui::Event::PointerMoved(pos)],
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![],
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut view = View {
+                        ui,
+                        origin: egui::pos2(0.0, 0.0),
+                        unit: 1.0,
+                        skin: &skin,
+                        textures: &textures,
+                        mask: None,
+                    };
+                    list(&mut app, &mut view, &rows, height);
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert!(app.winamp.playlist_selection.contains(&1));
+        assert_eq!(app.winamp.playlist_selection.len(), 1);
+        assert!(egui::Popup::is_id_open(
+            &ctx,
+            egui::Id::new(("item-menu", "playlist"))
+        ));
         app.backend.shutdown();
     }
 

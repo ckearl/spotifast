@@ -16,10 +16,11 @@ use egui::{Color32, Event, Key, Sense};
 use crate::api::models::PlayableItem;
 use crate::app::App;
 use crate::i18n::gettext;
-use crate::model::{Action, Loadable, Page, WinampSection};
+use crate::model::{Action, Loadable, Page, RowContext, WinampSection};
 use crate::skin::layout::{self, Area};
 use crate::util;
 
+use super::item_menu::{self, ItemAction};
 use super::section::{self, ListRow};
 use super::{PixelText, View};
 
@@ -30,10 +31,12 @@ use state::{Choice, FindMode, FindPage, FindRow, ItemKind, track_row};
 
 /// One row of text, as the playlist's.
 const ROW: u32 = layout::PLAYLIST_TRACK_HEIGHT;
-/// The bottom bar. +LIST and RADIO arrive with the actions.
+/// The bottom bar.
 const BUTTONS: [&str; 5] = ["PLAY", "+QUEUE", "+LIST", "RADIO", "BACK"];
 const PLAY: usize = 0;
 const QUEUE: usize = 1;
+const LIST: usize = 2;
+const RADIO: usize = 3;
 const BACK: usize = 4;
 /// Half a blink of the caret.
 const BLINK: Duration = Duration::from_millis(530);
@@ -676,6 +679,38 @@ fn queue(app: &mut App, row: &FindRow) {
     }
 }
 
+/// The list the page's songs sit in, for the actions on them: the album,
+/// or the playlist, which a song can be taken out of when the account may
+/// edit it. `None` elsewhere.
+pub(super) fn row_context(app: &App) -> Option<RowContext> {
+    match app.winamp.find.page() {
+        FindPage::Album { id, .. } => Some(RowContext::Context {
+            uri: format!("spotify:album:{id}"),
+            editable_playlist: None,
+        }),
+        FindPage::Playlist { id, .. } => {
+            let playlist = app
+                .playlist_pages
+                .get(id)
+                .and_then(|page| page.playlist.get())
+                .or_else(|| {
+                    app.library
+                        .playlists
+                        .get()?
+                        .iter()
+                        .find(|playlist| playlist.id == *id)
+                });
+            Some(RowContext::Context {
+                uri: format!("spotify:playlist:{id}"),
+                editable_playlist: playlist
+                    .filter(|playlist| app.can_edit_playlist(playlist))
+                    .map(|playlist| (id.clone(), playlist.snapshot_id.clone())),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Whether FIND is drawn open, so it can hold the keyboard.
 fn open(app: &App) -> bool {
     app.settings.section_open(WinampSection::Find)
@@ -888,6 +923,11 @@ pub(super) fn show(app: &mut App, view: &mut View, focused: bool) {
         pick(app, &listing, index);
     }
     let rows = &listing.rows;
+    let opened = response
+        .secondary
+        .and_then(|index| rows.get(index))
+        .map(|row| (row.clone(), row_context(app)));
+    item_menu::context_menu(app, view, "find", opened);
     if let Some(index) = response.double_clicked {
         choose(app, rows, index);
     }
@@ -899,7 +939,14 @@ pub(super) fn show(app: &mut App, view: &mut View, focused: bool) {
     }
 
     let chosen = app.winamp.find.selected.filter(|index| *index < rows.len());
-    match section::bottom_buttons(view, height, &BUTTONS, "find") {
+    let chosen_row = chosen.and_then(|index| rows.get(index));
+    let pressed = section::bottom_buttons(view, height, &BUTTONS, "find");
+    // +LIST opens your playlists for the song picked.
+    let listing_for = chosen_row
+        .filter(|row| pressed == Some(LIST) && row.kind == ItemKind::Song)
+        .cloned();
+    item_menu::playlist_menu(app, view, "find", listing_for);
+    match pressed {
         Some(PLAY) => {
             if let Some(index) = chosen {
                 choose(app, rows, index);
@@ -908,6 +955,12 @@ pub(super) fn show(app: &mut App, view: &mut View, focused: bool) {
         Some(QUEUE) => {
             if let Some(row) = chosen.and_then(|index| rows.get(index)) {
                 queue(app, row);
+            }
+        }
+        Some(RADIO) => {
+            if let Some(row) = chosen_row {
+                let context = row_context(app);
+                item_menu::perform(app, row, ItemAction::Radio, context.as_ref());
             }
         }
         Some(BACK) => back(app),
@@ -1641,6 +1694,81 @@ mod tests {
         back(&mut app);
         assert_eq!(app.winamp.find.page(), &FindPage::Top);
         assert_eq!(app.winamp.find.selected, Some(artist), "back to the row");
+        app.backend.shutdown();
+    }
+
+    /// A press and release of `button` at a point in skin pixels.
+    fn press_at(app: &mut App, ctx: &egui::Context, button: egui::PointerButton, x: f32, y: f32) {
+        let pos = egui::pos2(x, y);
+        let event = |pressed| Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw(app, ctx, vec![Event::PointerMoved(pos)]);
+        draw(app, ctx, vec![event(true)]);
+        draw(app, ctx, vec![event(false)]);
+    }
+
+    /// A right-click on a row picks it and opens its actions; the menu
+    /// stays open, on that row, while the list goes on being drawn.
+    #[test]
+    fn a_right_click_opens_the_rows_actions() {
+        let ctx = egui::Context::default();
+        let mut app = searched_app();
+        app.settings.find_open = true;
+        app.winamp.find.set_query("Bonobo".into());
+        let area = section::list_area(app.settings.section_height(WinampSection::Find));
+        let y = (area.y + 2 * ROW + ROW + ROW / 2) as f32;
+        let popup = egui::Id::new(("item-menu", "find"));
+        press_at(&mut app, &ctx, egui::PointerButton::Secondary, 60.0, y);
+        assert_eq!(app.winamp.find.selected, Some(1));
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        draw(&mut app, &ctx, vec![]);
+        assert!(egui::Popup::is_id_open(&ctx, popup), "it stays open");
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn plus_list_offers_the_playlists_and_radio_opens_inside_find() {
+        let ctx = egui::Context::default();
+        let mut app = searched_app();
+        app.settings.find_open = true;
+        app.winamp.find.set_query("Bonobo".into());
+        // The first frame keeps the answer, which picks no row.
+        draw(&mut app, &ctx, vec![]);
+        app.winamp.find.selected = Some(0);
+        let song = visible_rows(&app)[0].clone();
+        let height = app.settings.section_height(WinampSection::Find);
+        let bar = (height - layout::PLAYLIST_BOTTOM_HEIGHT + 19) as f32;
+        // PLAY and +QUEUE before it, each five pixels a letter and padded.
+        let x = |index: usize| {
+            let mut x = layout::PLAYLIST_LEFT_WIDTH as f32;
+            for label in &BUTTONS[..index] {
+                x += 5.0 * label.len() as f32 + 12.0;
+            }
+            x + 6.0
+        };
+        press_at(&mut app, &ctx, egui::PointerButton::Primary, x(LIST), bar);
+        assert!(egui::Popup::is_id_open(
+            &ctx,
+            egui::Id::new(("item-playlists", "find"))
+        ));
+        // It hangs below the button, over RADIO: Escape closes it.
+        draw(
+            &mut app,
+            &ctx,
+            vec![press(Key::Escape, egui::Modifiers::NONE)],
+        );
+        draw(&mut app, &ctx, vec![]);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        press_at(&mut app, &ctx, egui::PointerButton::Primary, x(RADIO), bar);
+        assert!(matches!(
+            app.winamp.find.page(),
+            FindPage::Radio { seed, .. } if *seed == song.uri
+        ));
+        assert!(!app.actions.iter().any(|a| matches!(a, Action::Open(_))));
         app.backend.shutdown();
     }
 

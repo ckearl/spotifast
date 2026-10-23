@@ -29,6 +29,7 @@ use super::widgets::{SliderEvent, wheel_notches};
 
 mod equalizer;
 pub(crate) mod find;
+mod item_menu;
 mod pixel_text;
 mod playlist;
 mod section;

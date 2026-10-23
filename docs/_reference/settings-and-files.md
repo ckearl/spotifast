@@ -478,7 +478,8 @@ cargo run --release --features demo -- \
 The image uses the current window size. `--demo-size WIDTHxHEIGHT` sets that
 size in logical pixels for a shot (for example `760x800` or `1240x800`).
 `--demo-shot-delay <MS>` sets how long to wait for cover art before taking it.
-`--demo-click X,Y` clicks there before the shot, to show an open menu.
+`--demo-click X,Y` clicks there before the shot, to show an open menu, and
+`--demo-right-click X,Y` right-clicks there, to show a right-click menu.
 `--demo-drag X,Y:X,Y` shows a drag in progress: the pointer presses at the
 first point, in logical pixels, and is still held down at the second when the
 shot is taken.

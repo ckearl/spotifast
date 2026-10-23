@@ -95,6 +95,12 @@ struct Cli {
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "X,Y", value_parser = parse_demo_point, conflicts_with = "demo_drag")]
     demo_click: Option<egui::Pos2>,
+
+    /// `--demo-click` with the secondary button, for a shot of a
+    /// right-click menu.
+    #[cfg(feature = "demo")]
+    #[arg(long, value_name = "X,Y", value_parser = parse_demo_point, conflicts_with_all = ["demo_drag", "demo_click"])]
+    demo_right_click: Option<egui::Pos2>,
 }
 
 /// Remote control of the running instance, for Raycast scripts, launchers,
@@ -583,12 +589,21 @@ pub(crate) fn run() -> eframe::Result<()> {
             to,
             frame: 0,
             click: false,
+            button: egui::PointerButton::Primary,
         })
         .or(cli.demo_click.map(|at| DemoDrag {
             from: at,
             to: at,
             frame: 0,
             click: true,
+            button: egui::PointerButton::Primary,
+        }))
+        .or(cli.demo_right_click.map(|at| DemoDrag {
+            from: at,
+            to: at,
+            frame: 0,
+            click: true,
+            button: egui::PointerButton::Secondary,
         }));
     #[cfg(feature = "demo")]
     let demo_inner = cli.demo_size;
@@ -1182,6 +1197,7 @@ mod native_window_tests {
             to,
             frame: 0,
             click: false,
+            button: egui::PointerButton::Primary,
         };
         let frames: Vec<_> = (0..=DemoDrag::REST + DemoDrag::GLIDE + 5)
             .map(|_| drag.events())
@@ -1213,6 +1229,7 @@ mod native_window_tests {
             to: at,
             frame: 0,
             click: true,
+            button: egui::PointerButton::Primary,
         };
         let events: Vec<_> = (0..=DemoDrag::REST + DemoDrag::GLIDE + 5)
             .flat_map(|_| click.events())
@@ -1435,6 +1452,7 @@ struct DemoDrag {
     to: egui::Pos2,
     frame: u32,
     click: bool,
+    button: egui::PointerButton,
 }
 
 #[cfg(feature = "demo")]
@@ -1457,7 +1475,7 @@ impl DemoDrag {
         if frame == Self::REST || (self.click && frame == Self::REST + 1) {
             events.push(egui::Event::PointerButton {
                 pos,
-                button: egui::PointerButton::Primary,
+                button: self.button,
                 pressed: frame == Self::REST,
                 modifiers: egui::Modifiers::NONE,
             });
