@@ -120,6 +120,21 @@ pub struct WinampState {
 }
 
 impl WinampState {
+    /// The first row in view of the playlist (`None`) or of a section's
+    /// list; VIS has none.
+    pub fn list_scroll(
+        &mut self,
+        section: Option<crate::model::WinampSection>,
+    ) -> Option<&mut usize> {
+        use crate::model::WinampSection::*;
+        match section {
+            None => Some(&mut self.playlist_scroll),
+            Some(Find) => Some(&mut self.find_scroll),
+            Some(Lyrics) => Some(&mut self.lyrics_scroll),
+            Some(Vis) => None,
+        }
+    }
+
     pub fn new(restore_pos: Option<[f32; 2]>, tap: Arc<AudioTap>, eq: crate::eq::SharedEq) -> Self {
         Self {
             skin: Skin::builtin(),
@@ -404,6 +419,34 @@ pub fn pick_another(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Middle-click scrolling reports a row for the playlist or a section;
+    /// the app writes it to that list's own scroll and no other.
+    #[test]
+    fn a_scrolled_section_list_keeps_its_own_first_row() {
+        use crate::model::WinampSection;
+        let mut state = WinampState::new(None, Default::default(), Default::default());
+        *state.list_scroll(Some(WinampSection::Find)).unwrap() = 7;
+        *state.list_scroll(Some(WinampSection::Lyrics)).unwrap() = 3;
+        assert_eq!(
+            (
+                state.playlist_scroll,
+                state.find_scroll,
+                state.lyrics_scroll
+            ),
+            (0, 7, 3)
+        );
+        *state.list_scroll(None).unwrap() = 5;
+        assert_eq!(
+            (
+                state.playlist_scroll,
+                state.find_scroll,
+                state.lyrics_scroll
+            ),
+            (5, 7, 3)
+        );
+        assert!(state.list_scroll(Some(WinampSection::Vis)).is_none());
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("spotifast-{name}-{}", std::process::id()));

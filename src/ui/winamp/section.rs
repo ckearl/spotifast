@@ -426,7 +426,8 @@ pub(super) struct ListResponse {
 /// The rows, in the skin's colours and the playlist's font, scrolled by
 /// the wheel and by the handle in the right-hand tiles. `scroll` is the
 /// first row in view and `wheel` the wheel's leftover, both kept by the
-/// caller between frames.
+/// caller between frames; middle-click scrolling writes the section's own
+/// scroll in `WinampState` after the frame.
 pub(super) fn list(
     view: &mut View,
     text: &mut PixelText,
@@ -434,8 +435,9 @@ pub(super) fn list(
     scroll: &mut usize,
     wheel: &mut f32,
     area: Area,
-    id: &str,
+    section: WinampSection,
 ) -> ListResponse {
+    let id = key(section);
     let style = view.skin.playlist.clone();
     let rgb = |[r, g, b]: [u8; 3]| Color32::from_rgb(r, g, b);
     view.fill(
@@ -469,13 +471,8 @@ pub(super) fn list(
     *scroll = (*scroll).min(most);
     let row_points = layout::PLAYLIST_TRACK_HEIGHT as f32 * view.unit;
     let rect = view.rect(area);
-    // A child with its own id, so each list is its own area to autoscroll.
-    let mut child = view.ui.new_child(
-        egui::UiBuilder::new()
-            .id_salt(("winamp-section-list", id))
-            .max_rect(rect),
-    );
-    crate::autoscroll::playlist(&mut child, rect, *scroll, most, row_points);
+    // Middle-click scrolling hands its rows back to this section's list.
+    crate::autoscroll::playlist(view.ui, rect, *scroll, most, row_points, Some(section));
 
     let ctx = view.ui.ctx().clone();
     let painter = view

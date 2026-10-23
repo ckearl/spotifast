@@ -370,6 +370,7 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
         scroll,
         most,
         layout::PLAYLIST_TRACK_HEIGHT as f32 * view.unit,
+        None,
     );
 
     let ctx = view.ui.ctx().clone();

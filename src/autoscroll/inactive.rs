@@ -2,6 +2,8 @@
 
 use egui::{Context, Id, Rect, Response, ScrollArea, Ui};
 
+use crate::model::WinampSection;
+
 #[derive(Default)]
 pub struct Autoscroll {
     _private: (),
@@ -11,7 +13,7 @@ pub struct Autoscroll {
 pub struct Outcome {
     pub scrolling: bool,
     pub stop_following_lyrics: bool,
-    pub playlist_scroll: Option<usize>,
+    pub playlist_scroll: Option<(Option<WinampSection>, usize)>,
 }
 
 impl Autoscroll {
@@ -40,4 +42,12 @@ pub fn show<R>(
 
 pub fn lyrics(_ui: &Ui, _id: Id) {}
 
-pub fn playlist(_ui: &mut Ui, _rect: Rect, _offset: usize, _maximum: usize, _row_points: f32) {}
+pub fn playlist(
+    _ui: &mut Ui,
+    _rect: Rect,
+    _offset: usize,
+    _maximum: usize,
+    _row_points: f32,
+    _section: Option<WinampSection>,
+) {
+}

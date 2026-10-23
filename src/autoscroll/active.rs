@@ -5,6 +5,7 @@
 //! another pane never transfers the gesture. Speed, dead zone, cursor and the
 //! hold-or-click choice follow Chromium's middle-click autoscroll.
 
+use crate::model::WinampSection;
 use egui::{Context, Id, LayerId, Pos2, Rect, Response, ScrollArea, Ui, Vec2, ViewportId};
 
 const FRAME_ID: &str = "spotifast-autoscroll-frame";
@@ -52,7 +53,12 @@ impl Input {
 enum Kind {
     Ordinary,
     Lyrics,
-    Playlist { row_points: f32 },
+    /// A skinned list in the mini player: the playlist's (`None`) or a
+    /// section's.
+    Playlist {
+        row_points: f32,
+        section: Option<WinampSection>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -110,7 +116,9 @@ struct Active {
 pub struct Outcome {
     pub scrolling: bool,
     pub stop_following_lyrics: bool,
-    pub playlist_scroll: Option<usize>,
+    /// A skinned list's new first row, and whose list it is: the
+    /// playlist's (`None`) or a section's.
+    pub playlist_scroll: Option<(Option<WinampSection>, usize)>,
 }
 
 impl Outcome {
@@ -229,8 +237,12 @@ impl Autoscroll {
             state.offset = offset;
             match owner.kind {
                 Kind::Ordinary | Kind::Lyrics => state.store(ctx, owner.id),
-                Kind::Playlist { row_points } => {
-                    outcome.playlist_scroll = Some((offset.y / row_points).floor() as usize)
+                Kind::Playlist {
+                    row_points,
+                    section,
+                } => {
+                    outcome.playlist_scroll =
+                        Some((section, (offset.y / row_points).floor() as usize))
                 }
             }
             if offset != active.offset {
@@ -415,9 +427,17 @@ pub fn lyrics(ui: &Ui, id: Id) {
     });
 }
 
-/// The skinned playlist scrolls in whole rows instead of using ScrollArea.
-/// It still participates in the same ownership and cancellation rules.
-pub fn playlist(ui: &mut Ui, rect: Rect, offset: usize, maximum: usize, row_points: f32) {
+/// The skinned playlist, and the sections' lists under it (`section`),
+/// scroll in whole rows instead of using ScrollArea. They still
+/// participate in the same ownership and cancellation rules.
+pub fn playlist(
+    ui: &mut Ui,
+    rect: Rect,
+    offset: usize,
+    maximum: usize,
+    row_points: f32,
+    section: Option<WinampSection>,
+) {
     let enabled = ui.ctx().data_mut(|data| {
         data.get_temp_mut_or_default::<Observations>(Id::new(FRAME_ID))
             .enabled
@@ -426,11 +446,14 @@ pub fn playlist(ui: &mut Ui, rect: Rect, offset: usize, maximum: usize, row_poin
         return;
     }
     let rect = rect.intersect(ui.clip_rect());
-    let id = ui.id().with("autoscroll-winamp-playlist");
+    let id = ui.id().with(("autoscroll-winamp-playlist", section));
     let mut state = egui::scroll_area::State::default();
     state.offset = egui::vec2(0.0, offset as f32 * row_points);
     let area = Area {
-        kind: Kind::Playlist { row_points },
+        kind: Kind::Playlist {
+            row_points,
+            section,
+        },
         id,
         layer: ui.layer_id(),
         rect,

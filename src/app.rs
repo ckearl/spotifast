@@ -12655,8 +12655,10 @@ impl App {
         if autoscroll.stop_following_lyrics {
             self.lyrics_following = false;
         }
-        if let Some(offset) = autoscroll.playlist_scroll {
-            self.winamp.playlist_scroll = offset;
+        if let Some((section, offset)) = autoscroll.playlist_scroll
+            && let Some(scroll) = self.winamp.list_scroll(section)
+        {
+            *scroll = offset;
         }
         self.refresh_frame_now();
         self.sync_media_controls(ctx);

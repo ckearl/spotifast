@@ -468,7 +468,7 @@ fn show_section(app: &mut App, view: &mut View, section: WinampSection, focused:
             &mut winamp.find_scroll,
             &mut winamp.find_wheel,
             section::list_area(chrome.height),
-            "find",
+            WinampSection::Find,
         );
     }
 }

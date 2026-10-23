@@ -427,9 +427,10 @@ fn the_skinned_playlist_accumulates_fractional_motion_and_returns_whole_row_upda
                     scroll,
                     80,
                     13.0,
+                    None,
                 );
                 let outcome = controller.finish(&ctx, true);
-                if let Some(offset) = outcome.playlist_scroll {
+                if let Some((None, offset)) = outcome.playlist_scroll {
                     scroll = offset;
                 }
             },
@@ -465,6 +466,71 @@ fn the_skinned_playlist_accumulates_fractional_motion_and_returns_whole_row_upda
     assert!(!active);
     assert_eq!(stopped, position);
     assert_eq!(render(vec![], true).1, position);
+}
+
+/// The mini player's sections hang under the playlist and scroll the same
+/// way, but a middle-click scroll in one must move that section's list, not
+/// the playlist above it.
+#[test]
+fn a_section_list_scrolls_itself_and_leaves_the_playlist_alone() {
+    use crate::model::WinampSection;
+    let ctx = Context::default();
+    let mut controller = Autoscroll::default();
+    let mut frame = 0;
+    let mut playlist_scroll = 0;
+    let mut find_scroll = 0;
+    let mut render = |events| {
+        frame += 1;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(500.0, 500.0))),
+                events,
+                focused: true,
+                time: Some(frame as f64 / 60.0),
+                ..Default::default()
+            },
+            |ui| {
+                controller.begin(&ctx, true);
+                playlist(
+                    ui,
+                    Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(240.0, 200.0)),
+                    playlist_scroll,
+                    80,
+                    13.0,
+                    None,
+                );
+                playlist(
+                    ui,
+                    Rect::from_min_size(egui::pos2(10.0, 250.0), egui::vec2(240.0, 200.0)),
+                    find_scroll,
+                    80,
+                    13.0,
+                    Some(WinampSection::Find),
+                );
+                let outcome = controller.finish(&ctx, true);
+                match outcome.playlist_scroll {
+                    Some((None, offset)) => playlist_scroll = offset,
+                    Some((Some(WinampSection::Find), offset)) => find_scroll = offset,
+                    Some((Some(other), _)) => panic!("scrolled {other:?}"),
+                    None => {}
+                }
+            },
+        );
+        output.textures_delta.clear();
+    };
+    render(vec![]);
+    render(vec![]);
+    let anchor = egui::pos2(100.0, 300.0);
+    render(vec![
+        egui::Event::PointerMoved(anchor),
+        button(anchor, egui::PointerButton::Middle, true),
+    ]);
+    render(vec![button(anchor, egui::PointerButton::Middle, false)]);
+    for _ in 0..30 {
+        render(vec![egui::Event::PointerMoved(egui::pos2(100.0, 320.0))]);
+    }
+    assert!(find_scroll > 0, "the section's list moved");
+    assert_eq!(playlist_scroll, 0, "the playlist stayed put");
 }
 
 #[test]
