@@ -1422,6 +1422,25 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             "playlist" => app.settings.playlist_open = true,
             "shade" => app.settings.winamp_shaded = true,
             "playlist-shade" => app.settings.playlist_shaded = true,
+            // FIND, LYRICS and VIS under the playlist; rolled up; and
+            // stretched a step and two.
+            "sections" => {
+                app.settings.find_open = true;
+                app.settings.lyrics_open = true;
+                app.settings.vis_open = true;
+            }
+            "sections-shade" => {
+                app.settings.find_shaded = true;
+                app.settings.lyrics_shaded = true;
+                app.settings.vis_shaded = true;
+            }
+            "sections-tall" => {
+                app.settings.find_height = 174;
+                app.settings.lyrics_height = 145;
+            }
+            // One screen pixel per skin pixel; after `winamp`, which asks
+            // for two.
+            "winamp-1x" => app.settings.skin_scale = Some(1),
             "eq" => {
                 app.settings.eq_open = true;
                 app.settings.eq_on = true;

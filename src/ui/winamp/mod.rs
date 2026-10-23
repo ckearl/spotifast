@@ -30,6 +30,7 @@ use super::widgets::{SliderEvent, wheel_notches};
 mod equalizer;
 mod pixel_text;
 mod playlist;
+mod section;
 
 pub use pixel_text::PixelText;
 
@@ -49,24 +50,32 @@ fn stack_height(settings: &crate::settings::Settings) -> u32 {
         };
     }
     if settings.playlist_open {
-        height += if settings.playlist_shaded {
-            layout::PLAYLIST_SHADE_HEIGHT
-        } else {
-            settings
-                .playlist_height
-                .clamp(layout::PLAYLIST_MIN_HEIGHT, layout::PLAYLIST_MAX_HEIGHT)
-        };
+        height += playlist_height(settings);
     }
-    for section in [
-        WinampSection::Find,
-        WinampSection::Lyrics,
-        WinampSection::Vis,
-    ] {
+    for section in SECTIONS {
         if settings.section_open(section) {
             height += settings.section_height(section);
         }
     }
     height
+}
+
+/// The sections under the playlist, top to bottom.
+const SECTIONS: [WinampSection; 3] = [
+    WinampSection::Find,
+    WinampSection::Lyrics,
+    WinampSection::Vis,
+];
+
+/// The playlist's height in skin pixels, rolled up or stretched.
+fn playlist_height(settings: &crate::settings::Settings) -> u32 {
+    if settings.playlist_shaded {
+        layout::PLAYLIST_SHADE_HEIGHT
+    } else {
+        settings
+            .playlist_height
+            .clamp(layout::PLAYLIST_MIN_HEIGHT, layout::PLAYLIST_MAX_HEIGHT)
+    }
 }
 
 /// The window's size in logical points, for the given points per skin
@@ -149,6 +158,11 @@ impl View<'_> {
     }
 
     fn paint(&self, painter: &egui::Painter, sprite: Sprite, x: u32, y: u32) {
+        self.paint_tinted(painter, sprite, x, y, Color32::WHITE);
+    }
+
+    /// A sprite multiplied by a colour: white leaves it as the skin drew it.
+    fn paint_tinted(&self, painter: &egui::Painter, sprite: Sprite, x: u32, y: u32, tint: Color32) {
         let Some((bitmap, clipped)) = self.skin.sprite(sprite) else {
             return;
         };
@@ -173,7 +187,7 @@ impl View<'_> {
                 self.origin + vec2((x + dx) as f32, (y + dy) as f32) * self.unit,
                 vec2(columns as f32, rows as f32) * self.unit,
             );
-            painter.image(texture, dest, uv, Color32::WHITE);
+            painter.image(texture, dest, uv, tint);
         };
         match self.mask {
             None => piece(0, 0, clipped.width, clipped.height),
@@ -233,6 +247,11 @@ impl View<'_> {
 
     /// A line of the skin's bitmap font, cut off at the area's edge.
     fn text(&self, text: &str, area: Area) {
+        self.text_tinted(text, area, Color32::WHITE);
+    }
+
+    /// A line of the skin's font multiplied by a colour, to dim it.
+    fn text_tinted(&self, text: &str, area: Area, tint: Color32) {
         let clip = self.rect(area).intersect(self.ui.clip_rect());
         let painter = self.ui.painter().with_clip_rect(clip);
         for (index, character) in text.chars().enumerate() {
@@ -240,7 +259,7 @@ impl View<'_> {
             if x >= area.x + area.width {
                 break;
             }
-            self.paint(&painter, font::glyph(character), x, area.y);
+            self.paint_tinted(&painter, font::glyph(character), x, area.y, tint);
         }
     }
 
@@ -404,12 +423,53 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             mask: None,
         };
         playlist::show(app, &mut below, now.as_ref(), focused);
+        below_y += playlist_height(&app.settings);
+    }
+    for section in SECTIONS {
+        if !app.settings.section_open(section) {
+            continue;
+        }
+        let mut below = View {
+            ui: view.ui,
+            origin: origin + vec2(0.0, below_y as f32 * unit),
+            unit,
+            skin: &skin,
+            textures: &textures,
+            mask: None,
+        };
+        show_section(app, &mut below, section, focused);
+        below_y += app.settings.section_height(section);
     }
 
     if vis_moving {
         crate::theme::visualiser_frame(&ctx, app.visualiser_fps());
     } else if now.is_some() {
         ctx.request_repaint_after(Duration::from_millis(220));
+    }
+}
+
+/// One section under the playlist, in its frame. The bodies come with the
+/// sections themselves; until then FIND shows its empty list.
+fn show_section(app: &mut App, view: &mut View, section: WinampSection, focused: bool) {
+    let title = match section {
+        WinampSection::Find => "FIND",
+        WinampSection::Lyrics => "LYRICS",
+        WinampSection::Vis => "VIS",
+    };
+    let Some(chrome) = section::frame(app, view, section, title, focused) else {
+        return;
+    };
+    if section == WinampSection::Find {
+        let winamp = &mut app.winamp;
+        section::list(
+            view,
+            &mut winamp.playlist_text,
+            &[],
+            &mut winamp.find_scroll,
+            &mut winamp.find_wheel,
+            section::list_area(chrome.height),
+            "find",
+        );
     }
 }
 
@@ -436,6 +496,7 @@ fn full_window(
     rates(app, view, now);
     sliders(app, view, now);
     windows_buttons(app, view);
+    section_toggles(app, view);
     transport(app, view, now);
     shuffle_repeat(app, view, now);
     if view
@@ -741,6 +802,16 @@ fn options_menu(app: &mut App, ui: &mut Ui, unit: f32) {
             .changed()
         {
             app.actions.push(Action::SetWinampTaskbar(visible));
+        }
+    }
+    for (section, label) in [
+        (WinampSection::Find, gettext(locale, "Search")),
+        (WinampSection::Lyrics, gettext(locale, "Lyrics")),
+        (WinampSection::Vis, gettext(locale, "Spectrum analyser")),
+    ] {
+        let mut open = app.settings.section_open(section);
+        if ui.checkbox(&mut open, label.as_ref()).clicked() {
+            app.actions.push(Action::ToggleWinampSection(section));
         }
     }
     let mut milkdrop = app.settings.milkdrop_open;
@@ -1458,6 +1529,71 @@ fn windows_buttons(app: &mut App, view: &mut View) {
         app.actions.push(Action::ToggleWinampPlaylist);
     }
 }
+
+/// FIND, LYR, VIS and DEV: the skin has art only for EQ and PL, so these
+/// are written in its font, along the strip under the transport that
+/// Winamp's skins leave blank. A section's switch is lit while it is open
+/// and dim while it is closed, and its label drops a pixel while held, as
+/// a pressed button does. DEV will open the device menu.
+fn section_toggles(app: &mut App, view: &mut View) {
+    let locale = app.locale;
+    let toggles = [
+        (
+            "FIND",
+            layout::FIND_TOGGLE,
+            Some(WinampSection::Find),
+            gettext(locale, "Search"),
+        ),
+        (
+            "LYR",
+            layout::LYRICS_TOGGLE,
+            Some(WinampSection::Lyrics),
+            gettext(locale, "Lyrics"),
+        ),
+        (
+            "VIS",
+            layout::VIS_TOGGLE,
+            Some(WinampSection::Vis),
+            gettext(locale, "Spectrum analyser"),
+        ),
+        (
+            "DEV",
+            layout::DEVICES_TOGGLE,
+            None,
+            gettext(locale, "Connect to a device"),
+        ),
+    ];
+    for (label, area, section, hint) in toggles {
+        let response = view
+            .interact(area, &format!("toggle-{label}"), Sense::click())
+            .on_hover_text(hint.as_ref());
+        let lit = section.is_some_and(|section| app.settings.section_open(section));
+        let held = response.is_pointer_button_down_on();
+        let width = 5 * label.len() as u32;
+        view.text_tinted(
+            label,
+            Area::new(
+                area.x + (area.width - width) / 2,
+                area.y + 1 + u32::from(held),
+                width,
+                6,
+            ),
+            if lit || held {
+                Color32::WHITE
+            } else {
+                TOGGLE_DIM
+            },
+        );
+        if response.clicked()
+            && let Some(section) = section
+        {
+            app.actions.push(Action::ToggleWinampSection(section));
+        }
+    }
+}
+
+/// How dim a closed section's switch is drawn.
+const TOGGLE_DIM: Color32 = Color32::from_gray(110);
 
 fn transport(app: &mut App, view: &mut View, now: Option<&NowPlaying>) {
     let playing = now.is_some_and(|now| now.playing);

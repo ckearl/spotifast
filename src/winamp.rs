@@ -107,6 +107,14 @@ pub struct WinampState {
     pub playlist_resize: f32,
     /// The playlist's rows as Winamp drew them, kept once drawn.
     pub playlist_text: crate::ui::winamp::PixelText,
+    /// FIND's and LYRICS's lists: the first row in view and the wheel's
+    /// leftover, as the playlist keeps them.
+    pub find_scroll: usize,
+    pub find_wheel: f32,
+    pub lyrics_scroll: usize,
+    pub lyrics_wheel: f32,
+    /// The leftover of a section's corner drag; one is dragged at a time.
+    pub section_resize: f32,
     /// MilkDrop presets listed and downloaded from Settings.
     pub presets: crate::milkdrop::Presets,
 }
@@ -138,6 +146,11 @@ impl WinampState {
             playlist_wheel: 0.0,
             playlist_resize: 0.0,
             playlist_text: crate::ui::winamp::PixelText::default(),
+            find_scroll: 0,
+            find_wheel: 0.0,
+            lyrics_scroll: 0,
+            lyrics_wheel: 0.0,
+            section_resize: 0.0,
             presets: crate::milkdrop::Presets::new(),
         }
     }

@@ -16,6 +16,7 @@ use crate::skin::sprites;
 use crate::util;
 
 use super::View;
+use super::section::{fit, list_area, wheel_rows};
 
 /// One line of the list.
 struct Row {
@@ -255,16 +256,6 @@ fn frame(view: &mut View, height: u32, focused: bool) {
     view.sprite_at(PLAYLIST_BOTTOM_RIGHT, 125, bottom);
 }
 
-/// The list's own area, between the tiles.
-fn list_area(height: u32) -> Area {
-    Area::new(
-        layout::PLAYLIST_LEFT_WIDTH,
-        layout::PLAYLIST_TITLE_HEIGHT,
-        layout::WINDOW_WIDTH - layout::PLAYLIST_LEFT_WIDTH - layout::PLAYLIST_RIGHT_WIDTH,
-        height - layout::PLAYLIST_TITLE_HEIGHT - layout::PLAYLIST_BOTTOM_HEIGHT,
-    )
-}
-
 fn rows_visible(height: u32) -> usize {
     (list_area(height).height / layout::PLAYLIST_TRACK_HEIGHT) as usize
 }
@@ -362,31 +353,7 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
         .interact(area, "playlist-list", Sense::hover())
         .contains_pointer();
     if hovered {
-        let row_points = layout::PLAYLIST_TRACK_HEIGHT as f32 * view.unit;
-        let (lines, points, pages) = view.ui.ctx().input(|input| {
-            input
-                .events
-                .iter()
-                .fold((0.0, 0.0, 0.0), |sum, event| match event {
-                    egui::Event::MouseWheel { unit, delta, .. } => match unit {
-                        // One detent is one event however many lines the
-                        // system says it is worth; a free-spinning wheel's
-                        // fractions still add up.
-                        egui::MouseWheelUnit::Line => {
-                            let notch = if delta.y.abs() >= 1.0 {
-                                delta.y.signum()
-                            } else {
-                                delta.y
-                            };
-                            (sum.0 + notch, sum.1, sum.2)
-                        }
-                        egui::MouseWheelUnit::Point => (sum.0, sum.1 + delta.y, sum.2),
-                        egui::MouseWheelUnit::Page => (sum.0, sum.1, sum.2 + delta.y),
-                    },
-                    _ => sum,
-                })
-        });
-        app.winamp.playlist_wheel += rows_for_wheel(lines, points, pages, row_points, visible);
+        app.winamp.playlist_wheel += wheel_rows(view, visible);
         let rows_moved = app.winamp.playlist_wheel.trunc();
         if rows_moved != 0.0 {
             app.winamp.playlist_wheel -= rows_moved;
@@ -488,32 +455,6 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
             color,
         );
     }
-}
-
-/// How many rows a frame's wheel moves the list, positive downwards. A
-/// notch scrolls three rows, the Windows default Winamp's list followed;
-/// a trackpad's points scroll a row per row's height; a page is the rows
-/// in view. egui's deltas are positive when the content moves down, which
-/// is scrolling up.
-fn rows_for_wheel(lines: f32, points: f32, pages: f32, row_points: f32, visible: usize) -> f32 {
-    -(lines * 3.0 + points / row_points + pages * visible as f32)
-}
-
-/// Text cut to a width, with an ellipsis when it had to be.
-fn fit(text: &mut super::PixelText, label: &str, width: f32) -> String {
-    if text.width(label) <= width {
-        return label.to_string();
-    }
-    let chars: Vec<char> = label.chars().collect();
-    let mut keep = chars.len();
-    while keep > 0 {
-        keep -= 1;
-        let candidate: String = chars[..keep].iter().collect::<String>() + "\u{2026}";
-        if text.width(&candidate) <= width {
-            return candidate;
-        }
-    }
-    "\u{2026}".to_string()
 }
 
 /// The handle in the right-hand tiles, dragged to scroll.
@@ -814,6 +755,7 @@ fn list_menu(app: &mut App, ui: &mut egui::Ui, rows: &[Row], queue_uris: &[Strin
 
 #[cfg(test)]
 mod tests {
+    use super::super::section::rows_for_wheel;
     use super::*;
 
     #[test]

@@ -82,6 +82,12 @@ areas! {
     SHUFFLE = (164, 89, 47, 15);
     REPEAT = (210, 89, 28, 15);
     ABOUT = (253, 91, 13, 15);
+    /// The sections' switches, written in the skin's font in the strip
+    /// under the transport, which Winamp's own skins leave blank.
+    FIND_TOGGLE = (16, 106, 22, 9);
+    LYRICS_TOGGLE = (43, 106, 17, 9);
+    VIS_TOGGLE = (65, 106, 17, 9);
+    DEVICES_TOGGLE = (87, 106, 17, 9);
 }
 
 /// The playlist window, below the main one. Its height is whatever the
@@ -107,6 +113,10 @@ pub const SECTION_RESIZE_STEP: u32 = 29;
 pub const SECTION_SHADE_HEIGHT: u32 = 14;
 /// VIS has one fixed height.
 pub const VIS_HEIGHT: u32 = 58;
+/// VIS has no buttons, so its bottom bar is a short one cut from the
+/// playlist's, which leaves one row of side tiles for the graph.
+pub const SECTION_SHORT_BOTTOM_HEIGHT: u32 =
+    VIS_HEIGHT - PLAYLIST_TITLE_HEIGHT - PLAYLIST_TILE_HEIGHT;
 /// The title bar's buttons, from the playlist's top left.
 pub const PLAYLIST_CLOSE: Area = Area::new(264, 3, 9, 9);
 pub const PLAYLIST_SHADE: Area = Area::new(254, 3, 9, 9);
