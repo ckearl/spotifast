@@ -631,12 +631,14 @@ impl<'a> Lines<'a> {
                 right: row.duration_ms.map(util::format_duration_ms),
                 current: self.playing.as_deref() == Some(row.uri.as_str()),
                 selected: self.selected == Some(index),
+                centred: false,
             },
             None => ListRow {
                 label: Cow::Owned(self.error.clone().unwrap_or_default()),
                 right: None,
                 current: true,
                 selected: false,
+                centred: false,
             },
         }
     }

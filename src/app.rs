@@ -3640,9 +3640,10 @@ impl App {
         {
             self.refresh_queue(true);
         }
-        if self.show_lyrics_panel || self.lyrics_fullscreen.is_some() {
+        if self.show_lyrics_panel || self.lyrics_fullscreen.is_some() || self.settings.lyrics_open {
             // Fullscreen shows lyrics without the panel flag when the
-            // queue column is open; a track change must refresh them.
+            // queue column is open, and the mini player's LYRICS section
+            // has its own; a track change must refresh them.
             self.request_lyrics();
         }
     }
@@ -11940,6 +11941,10 @@ impl App {
                 };
                 *open = !*open;
                 self.settings_dirty = true;
+                if section == WinampSection::Lyrics && self.settings.lyrics_open {
+                    self.lyrics_following = true;
+                    self.request_lyrics();
+                }
             }
             Action::ToggleWinampSectionShade(section) => {
                 let shaded = match section {
@@ -12823,6 +12828,11 @@ impl App {
             && let Some(scroll) = self.winamp.list_scroll(section)
         {
             *scroll = offset;
+            // Reading elsewhere in LYRICS stops it following the song, as
+            // it does in the lyrics panel.
+            if section == Some(WinampSection::Lyrics) {
+                self.lyrics_following = false;
+            }
         }
         self.refresh_frame_now();
         self.sync_media_controls(ctx);
@@ -14560,6 +14570,52 @@ mod tests {
             Some("spotify:track:b"),
             "fullscreen requests the new track's lyrics"
         );
+        app.backend.shutdown();
+    }
+
+    /// The mini player's LYRICS section follows the song like the panel:
+    /// a new song while it is open asks for that song's words at once.
+    #[test]
+    fn an_open_lyrics_section_asks_for_the_new_songs_lyrics() {
+        let mut app = test_app("lyrics-section");
+        crate::demo::populate(&mut app);
+        app.offline = false;
+        app.settings.lyrics_open = true;
+        app.show_lyrics_panel = false;
+        app.lyrics_fullscreen = None;
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:lyrics-section-new".into(),
+            ..Default::default()
+        });
+        app.local.playback = Playback::Playing;
+        app.on_now_playing_changed();
+        assert_eq!(
+            app.lyrics_uri.as_deref(),
+            Some("spotify:track:lyrics-section-new")
+        );
+        assert!(matches!(app.lyrics, Loadable::Loading));
+        app.backend.shutdown();
+    }
+
+    /// Opening the section asks for the playing song's words.
+    #[test]
+    fn opening_the_lyrics_section_asks_for_the_songs_lyrics() {
+        let ctx = egui::Context::default();
+        let mut app = test_app("lyrics-section-open");
+        app.offline = false;
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:lyrics-section-open".into(),
+            ..Default::default()
+        });
+        app.local.playback = Playback::Playing;
+        app.on_now_playing_changed();
+        assert_eq!(app.lyrics_uri, None, "nothing shows lyrics yet");
+        app.apply(Action::ToggleWinampSection(WinampSection::Lyrics), &ctx);
+        assert_eq!(
+            app.lyrics_uri.as_deref(),
+            Some("spotify:track:lyrics-section-open")
+        );
+        assert!(matches!(app.lyrics, Loadable::Loading));
         app.backend.shutdown();
     }
 

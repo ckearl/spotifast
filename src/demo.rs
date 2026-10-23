@@ -1438,6 +1438,19 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.settings.find_height = 174;
                 app.settings.lyrics_height = 145;
             }
+            // LYRICS open on the song's synced words, following; with no
+            // words found; and with the fetch failed.
+            "lyrics-section" | "lyrics-section-empty" | "lyrics-section-error" => {
+                app.settings.lyrics_open = true;
+                app.settings.lyrics_height = 174;
+                app.lyrics_uri = app.now_playing().map(|now| now.uri);
+                app.lyrics_following = true;
+                app.lyrics = match surface {
+                    "lyrics-section-empty" => Loadable::Loaded(None),
+                    "lyrics-section-error" => Loadable::Failed("Connection interrupted".into()),
+                    _ => Loadable::Loaded(Some(sample_lyrics())),
+                };
+            }
             // FIND open on the demo's search, typing, with a row picked;
             // `find-empty` the empty box, on Liked Songs.
             "find" => {

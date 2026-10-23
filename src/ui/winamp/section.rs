@@ -441,6 +441,9 @@ pub(super) struct ListRow<'a> {
     pub right: Option<String>,
     pub current: bool,
     pub selected: bool,
+    /// Written in the middle of the line, as LYRICS writes its words,
+    /// rather than from the left.
+    pub centred: bool,
 }
 
 /// What happened to the list this frame, by row.
@@ -565,10 +568,16 @@ pub(super) fn list<'a>(
         }
         let label = fit(text, &row.label, room as f32);
         let label_line = text.line(&ctx, &label);
+        let width = label_line.width.min(room);
+        let indent = if row.centred {
+            (line.width - width) / 2
+        } else {
+            pad
+        };
         let at = Area::new(
-            line.x + pad,
+            line.x + indent,
             line.y + line.height.saturating_sub(label_line.height) / 2,
-            label_line.width.min(room),
+            width,
             label_line.height,
         );
         let uv_right = at.width as f32 / label_line.width.max(1) as f32;

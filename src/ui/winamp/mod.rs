@@ -31,6 +31,7 @@ mod equalizer;
 pub(crate) mod find;
 mod item_menu;
 pub(crate) mod keys;
+mod lyrics;
 mod pixel_text;
 mod playlist;
 mod section;
@@ -444,7 +445,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             textures: &textures,
             mask: None,
         };
-        show_section(app, &mut below, section, focused);
+        show_section(app, &mut below, section, now.as_ref(), focused);
         below_y += app.settings.section_height(section);
     }
 
@@ -471,15 +472,22 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
 }
 
-/// One section under the playlist, in its frame. LYRICS and VIS bring
-/// their bodies with them.
-fn show_section(app: &mut App, view: &mut View, section: WinampSection, focused: bool) {
-    let title = match section {
-        WinampSection::Find => return find::show(app, view, focused),
-        WinampSection::Lyrics => "LYRICS",
-        WinampSection::Vis => "VIS",
-    };
-    section::frame(app, view, section, title, focused);
+/// One section under the playlist, in its frame. FIND and LYRICS bring
+/// their bodies with them; VIS's is still empty.
+fn show_section(
+    app: &mut App,
+    view: &mut View,
+    section: WinampSection,
+    now: Option<&NowPlaying>,
+    focused: bool,
+) {
+    match section {
+        WinampSection::Find => find::show(app, view, focused),
+        WinampSection::Lyrics => lyrics::show(app, view, now, focused),
+        WinampSection::Vis => {
+            section::frame(app, view, section, "VIS", focused);
+        }
+    }
 }
 
 /// The main window as it usually is. Returns whether the visualiser is
