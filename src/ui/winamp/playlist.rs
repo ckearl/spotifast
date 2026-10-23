@@ -10,7 +10,7 @@ use egui::{Color32, Sense};
 use crate::api::models::PlayableItem;
 use crate::app::{App, NowPlaying};
 use crate::i18n::{gettext, pgettext};
-use crate::model::{Action, Page, RowContext, WinampSection};
+use crate::model::{Action, Page, RowContext};
 use crate::skin::layout::{self, Area};
 use crate::skin::sprites;
 use crate::util;
@@ -356,6 +356,22 @@ fn item_row(row: &Row) -> FindRow {
     }
 }
 
+/// The first row picked in PL while it is open, for the keys to act on.
+pub(super) fn selected_row(app: &App) -> Option<FindRow> {
+    if !app.settings.playlist_open {
+        return None;
+    }
+    let first = app.winamp.playlist_selection.iter().min()?;
+    let (rows, _) = rows(app, app.now_playing().as_ref());
+    rows.get(*first).map(item_row)
+}
+
+/// The playing song as PL's first row has it.
+pub(super) fn playing_row(app: &App) -> Option<FindRow> {
+    let (rows, _) = rows(app, app.now_playing().as_ref());
+    rows.iter().find(|row| row.current).map(item_row)
+}
+
 fn label(number: usize, subtitle: &str, title: &str) -> String {
     if subtitle.is_empty() {
         format!("{number}. {title}")
@@ -430,6 +446,7 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
             // Selection is by row, not by song: the same song can sit in
             // the list more than once and one click means one row.
             let index = scroll + offset;
+            app.winamp.find_picked_last = false;
             let selection = &mut app.winamp.playlist_selection;
             if adding {
                 if !selection.remove(&index) {
@@ -444,6 +461,7 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
         // picked, and opens its actions.
         if response.secondary_clicked() {
             let index = scroll + offset;
+            app.winamp.find_picked_last = false;
             let selection = &mut app.winamp.playlist_selection;
             if !selection.contains(&index) {
                 selection.clear();
@@ -646,15 +664,7 @@ fn add_menu(app: &mut App, ui: &mut egui::Ui) {
 
 /// Opens FIND, rolled down, with its box ready to type in.
 fn search_in_find(app: &mut App) {
-    if !app.settings.section_open(WinampSection::Find) {
-        app.actions
-            .push(Action::ToggleWinampSection(WinampSection::Find));
-    }
-    if app.settings.section_shaded(WinampSection::Find) {
-        app.actions
-            .push(Action::ToggleWinampSectionShade(WinampSection::Find));
-    }
-    app.winamp.find.focus_requested = true;
+    super::find::focus_box(app);
 }
 
 fn rem_menu(app: &mut App, ui: &mut egui::Ui, rows: &[Row]) {
@@ -817,6 +827,7 @@ fn list_menu(app: &mut App, ui: &mut egui::Ui, rows: &[Row], queue_uris: &[Strin
 mod tests {
     use super::super::section::rows_for_wheel;
     use super::*;
+    use crate::model::WinampSection;
 
     /// ADD's Search Spotify stays in the mini player: it opens FIND,
     /// rolled down, and gives its box the keyboard.

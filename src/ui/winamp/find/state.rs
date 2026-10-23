@@ -310,6 +310,12 @@ impl FindState {
         self.selected = None;
     }
 
+    /// The songs played lately: back to the top with the box emptied.
+    pub fn show_recent(&mut self) {
+        self.show_library();
+        self.set_mode(FindMode::Recent);
+    }
+
     fn search(&self) -> Vec<Action> {
         let query = self.query.trim();
         if query.is_empty() {

@@ -113,6 +113,16 @@ pub struct WinampState {
     pub find_wheel: f32,
     /// FIND's box, mode and pages.
     pub find: crate::ui::winamp::find::FindState,
+    /// Whether a row was last picked in FIND rather than PL, so the keys
+    /// act on FIND's selection.
+    pub find_picked_last: bool,
+    /// The two-key sequence under way, for the keys and the marquee.
+    pub keys: crate::ui::winamp::keys::Sequencer,
+    /// The song `a p` opens the add-to-playlist picker for, on the next
+    /// frame.
+    pub playlist_picker_for: Option<crate::ui::winamp::find::state::FindRow>,
+    /// Open the devices menu on the next frame; `g d` asks for it.
+    pub open_devices: bool,
     pub lyrics_scroll: usize,
     pub lyrics_wheel: f32,
     /// The leftover of a section's corner drag; one is dragged at a time.
@@ -166,6 +176,10 @@ impl WinampState {
             find_scroll: 0,
             find_wheel: 0.0,
             find: Default::default(),
+            find_picked_last: false,
+            keys: Default::default(),
+            playlist_picker_for: None,
+            open_devices: false,
             lyrics_scroll: 0,
             lyrics_wheel: 0.0,
             section_resize: 0.0,

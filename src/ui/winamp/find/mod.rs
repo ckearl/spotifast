@@ -645,7 +645,7 @@ impl<'a> Lines<'a> {
 /// A click on a line: a row is picked; the error line loads the page again.
 fn pick(app: &mut App, listing: &Listing, index: usize) {
     if index < listing.rows.len() {
-        app.winamp.find.selected = Some(index);
+        select(app, index);
     } else if let Some((_, Some(page))) = &listing.failed {
         app.actions.push(Action::Reload(page.clone()));
     }
@@ -732,6 +732,42 @@ pub(super) fn row_context(app: &App) -> Option<RowContext> {
 fn open(app: &App) -> bool {
     app.settings.section_open(WinampSection::Find)
         && !app.settings.section_shaded(WinampSection::Find)
+}
+
+/// Opens FIND, rolled down, when it is not shown.
+pub(super) fn unfold(app: &mut App) {
+    if !app.settings.section_open(WinampSection::Find) {
+        app.actions
+            .push(Action::ToggleWinampSection(WinampSection::Find));
+    }
+    if app.settings.section_shaded(WinampSection::Find) {
+        app.actions
+            .push(Action::ToggleWinampSectionShade(WinampSection::Find));
+    }
+}
+
+/// Opens FIND, rolled down, with its box ready to type in.
+pub(super) fn focus_box(app: &mut App) {
+    unfold(app);
+    app.winamp.find.focus_requested = true;
+}
+
+/// The row picked in FIND while it is shown, and the list it sits in.
+pub(super) fn selected_row(app: &App) -> Option<(FindRow, Option<RowContext>)> {
+    if !open(app) {
+        return None;
+    }
+    let index = app.winamp.find.selected?;
+    let row = visible_rows(app).get(index)?.clone();
+    Some((row, row_context(app)))
+}
+
+/// Picks the `index`th row, which the keys then act on.
+fn select(app: &mut App, index: usize) {
+    let winamp = &mut app.winamp;
+    winamp.find.selected = Some(index);
+    winamp.find.reselect = None;
+    winamp.find_picked_last = true;
 }
 
 /// The keyboard, before the mini player's own keys see it: while FIND has
@@ -825,7 +861,19 @@ fn key(app: &mut App, event: Event, now: Instant) {
                     choose(app, &rows, index);
                 }
             }
-            Key::Escape => app.winamp.find.focused = false,
+            // Esc empties the box; in an empty box it closes FIND.
+            Key::Escape if !app.winamp.find.query.is_empty() => {
+                let actions = app.winamp.find.set_query(String::new());
+                app.actions.extend(actions);
+                app.winamp.find_scroll = 0;
+            }
+            Key::Escape => {
+                app.winamp.find.focused = false;
+                if app.settings.section_open(WinampSection::Find) {
+                    app.actions
+                        .push(Action::ToggleWinampSection(WinampSection::Find));
+                }
+            }
             Key::ArrowDown => step(app, 1),
             Key::ArrowUp => step(app, -1),
             Key::Tab => {
@@ -843,13 +891,23 @@ fn key(app: &mut App, event: Event, now: Instant) {
 fn back(app: &mut App) {
     if app.winamp.find.back() {
         app.winamp.find_scroll = 0;
-        let Some(uri) = app.winamp.find.reselect.take() else {
-            return;
-        };
-        if let Some(index) = visible_rows(app).iter().position(|row| row.uri == uri) {
-            app.winamp.find.selected = Some(index);
-            reveal(app, index);
-        }
+        settle_reselect(app);
+    }
+}
+
+/// Picks the row `reselect` names once the list shows it: the row BACK
+/// returned to, or the playing song `g p` opened its list for, which may
+/// still be loading. Which list the keys act on stays as it was: a row
+/// picked in PL meanwhile is still theirs.
+fn settle_reselect(app: &mut App) {
+    let Some(uri) = app.winamp.find.reselect.clone() else {
+        return;
+    };
+    if let Some(index) = visible_rows(app).iter().position(|row| row.uri == uri) {
+        let find = &mut app.winamp.find;
+        find.selected = Some(index);
+        find.reselect = None;
+        reveal(app, index);
     }
 }
 
@@ -879,7 +937,7 @@ fn step(app: &mut App, delta: i64) {
         None => last,
         Some(index) => (index as i64 + delta).clamp(0, last),
     } as usize;
-    app.winamp.find.selected = Some(index);
+    select(app, index);
     reveal(app, index);
 }
 
@@ -920,6 +978,7 @@ pub(super) fn show(app: &mut App, view: &mut View, focused: bool) {
     take_focus(app, view, bar);
     hold_answer(app);
     fetch(app);
+    settle_reselect(app);
     input_bar(app, view, bar, focused);
     mode_row(app, view, modes);
 
@@ -962,7 +1021,13 @@ pub(super) fn show(app: &mut App, view: &mut View, focused: bool) {
     let listing_for = chosen_row
         .filter(|row| pressed == Some(LIST) && row.kind == ItemKind::Song)
         .cloned();
-    item_menu::playlist_menu(app, view, "find", listing_for);
+    item_menu::playlist_menu(
+        app,
+        view,
+        "find",
+        listing_for,
+        egui::PopupAnchor::PointerFixed,
+    );
     match pressed {
         Some(PLAY) => {
             if let Some(index) = chosen {
@@ -1308,9 +1373,15 @@ mod tests {
             "the kind stays, now listing Liked Songs"
         );
 
-        // Escape gives the keys back to the window.
+        // Escape in the emptied box closes FIND and gives the keys back
+        // to the window.
         frame(&mut app, &ctx, vec![press(Key::Escape, none)]);
         assert!(!app.winamp.find.focused);
+        assert!(matches!(
+            app.actions.as_slice(),
+            [Action::ToggleWinampSection(WinampSection::Find)]
+        ));
+        app.actions.clear();
         frame(&mut app, &ctx, vec![press(Key::M, none)]);
         assert!(matches!(app.actions.as_slice(), [Action::ToggleMute]));
 

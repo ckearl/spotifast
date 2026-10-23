@@ -13,7 +13,7 @@ use egui::Ui;
 use crate::api::models::{Album, ArtistRef, PlayableItem, Track};
 use crate::app::App;
 use crate::i18n::{gettext, pgettext};
-use crate::model::{Action, Loadable, RowContext, WinampSection};
+use crate::model::{Action, Loadable, RowContext};
 use crate::util;
 
 use super::View;
@@ -364,17 +364,10 @@ pub(super) fn label(app: &App, row: &FindRow, action: ItemAction) -> Cow<'static
 
 /// Opens `page` inside FIND, opening and rolling down FIND when it is
 /// not shown. BACK returns to where FIND was, on the row it came from.
-fn open_in_find(app: &mut App, page: FindPage, from: &FindRow) {
-    if !app.settings.find_open {
-        app.actions
-            .push(Action::ToggleWinampSection(WinampSection::Find));
-    }
-    if app.settings.section_shaded(WinampSection::Find) {
-        app.actions
-            .push(Action::ToggleWinampSectionShade(WinampSection::Find));
-    }
+pub(super) fn open_in_find(app: &mut App, page: FindPage, from: Option<String>) {
+    super::find::unfold(app);
     if app.winamp.find.page() != &page {
-        app.winamp.find.open_from(page, Some(from.uri.clone()));
+        app.winamp.find.open_from(page, from);
         app.winamp.find_scroll = 0;
     }
 }
@@ -486,17 +479,17 @@ pub(super) fn perform(
         }
         GoToArtist => {
             if let Some(page) = artist_page(app, row) {
-                open_in_find(app, page, row);
+                open_in_find(app, page, Some(row.uri.clone()));
             }
         }
         GoToAlbum => {
             if let Some(page) = album_page(app, row) {
-                open_in_find(app, page, row);
+                open_in_find(app, page, Some(row.uri.clone()));
             }
         }
         Radio => {
             if let Some(page) = radio_page(app, row) {
-                open_in_find(app, page, row);
+                open_in_find(app, page, Some(row.uri.clone()));
             }
         }
         CopyLink => app.actions.push(Action::CopyLink(row.uri.clone())),
@@ -561,7 +554,7 @@ fn pick_playlist(app: &mut App, ui: &mut Ui, item: &PlayableItem, query: egui::I
 /// The row a menu was opened on, and the list it sits in.
 type Target = (FindRow, Option<RowContext>);
 
-/// A menu of the mini player's style at the pointer, under `id`, opened
+/// A menu of the mini player's style at `anchor`, under `id`, opened
 /// when `opened` brings the row a right-click landed on this frame. The
 /// row is kept with the menu, so rows that move or go while it is open
 /// (an unliked song leaving Liked Songs) never change what it acts on.
@@ -569,6 +562,7 @@ fn popup<T: Clone + Send + Sync + 'static>(
     view: &mut View,
     id: egui::Id,
     opened: Option<T>,
+    anchor: egui::PopupAnchor,
 ) -> Option<(egui::Popup<'static>, T)> {
     let ctx = view.ui.ctx().clone();
     let open = opened.is_some();
@@ -578,7 +572,7 @@ fn popup<T: Clone + Send + Sync + 'static>(
         return None;
     }
     let target = ctx.data(|data| data.get_temp::<T>(id))?;
-    let popup = egui::Popup::new(id, ctx, egui::PopupAnchor::PointerFixed, view.ui.layer_id())
+    let popup = egui::Popup::new(id, ctx, anchor, view.ui.layer_id())
         .kind(egui::PopupKind::Menu)
         .layout(egui::Layout::top_down_justified(egui::Align::Min))
         .open_memory(open.then_some(egui::SetOpenCommand::Bool(true)));
@@ -588,8 +582,12 @@ fn popup<T: Clone + Send + Sync + 'static>(
 /// The right-click menu of a list, `id` naming which; `opened` is the row
 /// right-clicked this frame and the list it sits in.
 pub(super) fn context_menu(app: &mut App, view: &mut View, id: &str, opened: Option<Target>) {
-    let Some((popup, (row, context))) = popup(view, egui::Id::new(("item-menu", id)), opened)
-    else {
+    let Some((popup, (row, context))) = popup(
+        view,
+        egui::Id::new(("item-menu", id)),
+        opened,
+        egui::PopupAnchor::PointerFixed,
+    ) else {
         return;
     };
     super::menu(popup, view.skin, view.unit, |ui| {
@@ -597,12 +595,19 @@ pub(super) fn context_menu(app: &mut App, view: &mut View, id: &str, opened: Opt
     });
 }
 
-/// +LIST: your playlists, filtered as you type, to add the song to;
-/// `opened` is the song when the button was pressed this frame. A click in
-/// it types or scrolls; choosing a playlist closes it.
-pub(super) fn playlist_menu(app: &mut App, view: &mut View, id: &str, opened: Option<FindRow>) {
+/// +LIST and `a p`: your playlists, filtered as you type, to add the song
+/// to, at `anchor`; `opened` is the song when the button or key was
+/// pressed this frame. A click in it types or scrolls; choosing a playlist
+/// closes it.
+pub(super) fn playlist_menu(
+    app: &mut App,
+    view: &mut View,
+    id: &str,
+    opened: Option<FindRow>,
+    anchor: egui::PopupAnchor,
+) {
     let popup_id = egui::Id::new(("item-playlists", id));
-    let Some((popup, row)) = popup(view, popup_id, opened) else {
+    let Some((popup, row)) = popup(view, popup_id, opened, anchor) else {
         return;
     };
     let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);

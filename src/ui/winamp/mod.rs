@@ -30,6 +30,7 @@ use super::widgets::{SliderEvent, wheel_notches};
 mod equalizer;
 pub(crate) mod find;
 mod item_menu;
+pub(crate) mod keys;
 mod pixel_text;
 mod playlist;
 mod section;
@@ -358,8 +359,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     fit_window(&ctx, &app.settings, unit);
     let origin = ui.max_rect().min;
     let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
-    // FIND's box takes its typing before the window's single-key shortcuts.
+    // FIND's box takes its typing first, then the mini player's keys
+    // take theirs, and the window's shortcuts get what is left.
     find::keys(app, &ctx);
+    keys::handle(app, &ctx);
     super::keys::handle(app, &ctx);
     for path in dropped_skins(&ctx) {
         app.actions.push(Action::InstallSkin(path));
@@ -444,6 +447,22 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         show_section(app, &mut below, section, focused);
         below_y += app.settings.section_height(section);
     }
+
+    // `a p`'s playlists, under the marquee: there may be no pointer to
+    // open them at.
+    let picker_at = if shaded {
+        Area::new(layout::MARQUEE.x, layout::SHADE_HEIGHT, 0, 0)
+    } else {
+        Area::new(
+            layout::MARQUEE.x,
+            layout::MARQUEE.y + layout::MARQUEE.height,
+            0,
+            0,
+        )
+    };
+    let anchor = egui::PopupAnchor::Position(view.rect(picker_at).min);
+    let picker_for = app.winamp.playlist_picker_for.take();
+    item_menu::playlist_menu(app, &mut view, "keys", picker_for, anchor);
 
     if vis_moving {
         crate::theme::visualiser_frame(&ctx, app.visualiser_fps());
@@ -1278,7 +1297,13 @@ pub fn marquee_text(
 }
 
 fn marquee(app: &mut App, view: &mut View, now: Option<&NowPlaying>) {
-    let notice = app.toasts.last().map(|toast| toast.message.clone());
+    // A key sequence's first key, waiting for its second, says so first.
+    let notice = app
+        .winamp
+        .keys
+        .pending_label()
+        .map(str::to_string)
+        .or_else(|| app.toasts.last().map(|toast| toast.message.clone()));
     let text = marquee_text(
         app.locale,
         now,

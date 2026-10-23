@@ -188,8 +188,55 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
 
 /// The rows of the keyboard shortcuts dialog: the keys, then what they do.
 /// Key names stay as the keyboard prints them; words around them, and
-/// every description, are translated.
+/// every description, are translated. A row without keys heads the rows
+/// after it.
 pub fn shortcuts(locale: Locale) -> Vec<(Cow<'static, str>, Cow<'static, str>)> {
+    let mut rows = window_shortcuts(locale);
+    rows.extend(mini_player_shortcuts(locale));
+    rows
+}
+
+/// The mini player's own keys (`crate::ui::winamp::keys`): one for each
+/// section, and two pressed one after the other for the picked row, or
+/// the playing song when no list has one picked.
+fn mini_player_shortcuts(locale: Locale) -> Vec<(Cow<'static, str>, Cow<'static, str>)> {
+    let keys = |text: &'static str| Cow::Borrowed(text);
+    vec![
+        (Cow::Borrowed(""), gettext(locale, "Mini player")),
+        (
+            if cfg!(target_os = "macos") {
+                // Translators: Keep the key names. Only the word "or" is translated.
+                gettext(locale, "Cmd+F  or  /")
+            } else {
+                // Translators: Keep the key names. Only the word "or" is translated.
+                gettext(locale, "Ctrl+F  or  /")
+            },
+            gettext(locale, "Search"),
+        ),
+        (keys("E"), gettext(locale, "Equalizer")),
+        (keys("Q"), gettext(locale, "Playlist")),
+        (keys("L"), gettext(locale, "Lyrics")),
+        (keys("V"), gettext(locale, "Spectrum analyser")),
+        (keys("Y"), gettext(locale, "Copy link")),
+        (keys("G  A"), gettext(locale, "Go to artist")),
+        (keys("G  B"), gettext(locale, "Go to album")),
+        (keys("G  R"), gettext(locale, "Radio")),
+        (keys("G  H"), gettext(locale, "Recently played")),
+        (keys("G  Y"), gettext(locale, "Library")),
+        (keys("G  D"), gettext(locale, "Connect to a device")),
+        (keys("G  P"), gettext(locale, "Go to the playing song")),
+        (keys("A  Q"), gettext(locale, "Add to queue")),
+        (keys("A  N"), gettext(locale, "Play next")),
+        (keys("A  P"), gettext(locale, "Add to playlist")),
+        (keys("A  L"), gettext(locale, "Like, save or follow")),
+        (keys("D  L"), gettext(locale, "Unlike, unsave or unfollow")),
+        (keys("D  P"), gettext(locale, "Remove from this playlist")),
+        (keys("D  Q"), gettext(locale, "Remove from queue")),
+    ]
+}
+
+/// The keys of every window.
+fn window_shortcuts(locale: Locale) -> Vec<(Cow<'static, str>, Cow<'static, str>)> {
     let keys = |text: &'static str| Cow::Borrowed(text);
     vec![
         (
@@ -480,6 +527,32 @@ mod tests {
         );
         app.backend.shutdown();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_dialog_lists_the_mini_players_keys_under_their_heading() {
+        let rows = shortcuts(Locale::English);
+        let heading = rows
+            .iter()
+            .position(|(keys, description)| keys.is_empty() && description == "Mini player")
+            .expect("a Mini player heading");
+        let after: Vec<&str> = rows[heading + 1..]
+            .iter()
+            .map(|(keys, _)| keys.as_ref())
+            .collect();
+        for keys in [
+            "E", "Q", "L", "V", "Y", "G  A", "G  B", "G  R", "G  H", "G  Y", "G  D", "G  P",
+            "A  Q", "A  N", "A  P", "A  L", "D  L", "D  P", "D  Q",
+        ] {
+            assert!(
+                after.contains(&keys),
+                "{keys} is missing from the mini player's keys"
+            );
+        }
+        assert!(
+            rows[..heading].iter().all(|(keys, _)| !keys.is_empty()),
+            "only the heading has no keys"
+        );
     }
 
     #[test]

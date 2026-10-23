@@ -179,6 +179,13 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                 .spacing([24.0, 8.0])
                                 .show(ui, |ui| {
                                     for (keys, description) in super::keys::shortcuts(locale) {
+                                        // A row without keys heads the rows after it.
+                                        if keys.is_empty() {
+                                            ui.end_row();
+                                            cell(ui, &description, theme::bold(15.0), palette.text);
+                                            ui.end_row();
+                                            continue;
+                                        }
                                         cell(ui, &keys, theme::semibold(13.0), palette.text);
                                         cell(
                                             ui,
