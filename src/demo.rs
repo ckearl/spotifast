@@ -1439,7 +1439,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.settings.lyrics_height = 145;
             }
             // FIND open on the demo's search, typing, with a row picked;
-            // `find-albums` shows another mode, `find-empty` the empty box.
+            // `find-empty` the empty box, on Liked Songs.
             "find" => {
                 app.settings.find_open = true;
                 app.settings.find_height = 203;
@@ -1453,11 +1453,18 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 find.selected = Some(2);
                 find.focused = true;
             }
+            // Another kind: of the search after `find`, of the library
+            // after `find-empty`.
             "find-albums" => {
                 app.winamp.find.mode = crate::ui::winamp::find::state::FindMode::Albums
             }
+            "find-artists" => {
+                app.winamp.find.mode = crate::ui::winamp::find::state::FindMode::Artists
+            }
+            "find-lists" => app.winamp.find.mode = crate::ui::winamp::find::state::FindMode::Lists,
             "find-empty" => {
                 app.settings.find_open = true;
+                app.settings.find_height = 203;
                 let _ = app.winamp.find.set_query(String::new());
             }
             // FIND browsing, the box empty: RECENT; an album; an artist's

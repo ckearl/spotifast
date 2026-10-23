@@ -2,11 +2,11 @@
 //! has browsed to. Pure state, no drawing: the view in `mod.rs` reads it
 //! and the pages to come push onto its stack.
 
+use std::cell::RefCell;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use std::sync::Arc;
-
-use crate::api::models::SearchResults;
+use crate::api::models::{SearchResults, Track};
 use crate::model::{Action, RowContext};
 
 /// The most rows a search shows of each kind.
@@ -16,20 +16,27 @@ pub const RESULT_LIMIT: usize = 15;
 /// window's search field does.
 pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// What the list shows: the library or recent songs while the box is
-/// empty, one kind of search result while it is not.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What the list shows. A kind lists your library's while the box is
+/// empty (Liked Songs, followed artists, saved albums, your playlists)
+/// and the search's while it is not; RECENT, only with an empty box, the
+/// songs played lately.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum FindMode {
-    #[default]
-    Library,
     Recent,
+    #[default]
     Songs,
     Artists,
     Albums,
     Lists,
 }
 
-const EMPTY_MODES: [FindMode; 2] = [FindMode::Library, FindMode::Recent];
+const EMPTY_MODES: [FindMode; 5] = [
+    FindMode::Recent,
+    FindMode::Songs,
+    FindMode::Artists,
+    FindMode::Albums,
+    FindMode::Lists,
+];
 const SEARCH_MODES: [FindMode; 4] = [
     FindMode::Songs,
     FindMode::Artists,
@@ -43,7 +50,6 @@ impl FindMode {
     /// The mode row's word for it, in the skin's capitals.
     pub fn label(self) -> &'static str {
         match self {
-            FindMode::Library => "LIBRARY",
             FindMode::Recent => "RECENT",
             FindMode::Songs => "SONGS",
             FindMode::Artists => "ARTISTS",
@@ -52,9 +58,33 @@ impl FindMode {
         }
     }
 
-    /// Whether it lists search results.
-    pub fn is_search(self) -> bool {
+    /// Whether it is a kind of thing, listed from the library or a search.
+    pub fn is_kind(self) -> bool {
         SEARCH_MODES.contains(&self)
+    }
+}
+
+/// A song's row: its artists and name, its length, and where it is from.
+pub fn track_row(track: &Track) -> FindRow {
+    let present = |uri: Option<&String>| uri.filter(|uri| !uri.is_empty()).cloned();
+    FindRow {
+        uri: track.uri.clone(),
+        label: by(&track.artist_names(), &track.name),
+        name: track.name.clone(),
+        duration_ms: Some(track.duration_ms),
+        kind: ItemKind::Song,
+        album_uri: present(track.album.as_ref().map(|album| &album.uri)),
+        artist_uri: present(track.artists.first().and_then(|artist| artist.uri.as_ref())),
+        context: None,
+    }
+}
+
+/// "Who - what", or just what when nobody is named.
+pub fn by(who: &str, what: &str) -> String {
+    if who.is_empty() {
+        what.to_string()
+    } else {
+        format!("{who} - {what}")
     }
 }
 
@@ -95,7 +125,7 @@ pub enum Choice {
 
 /// Where FIND has browsed to; the bottom of the stack is the search or
 /// library itself.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FindPage {
     Top,
     Artist {
@@ -123,10 +153,17 @@ pub struct FindState {
     pub mode: FindMode,
     /// Never empty; `stack[0]` is `Top`.
     pub stack: Vec<FindPage>,
-    /// The row picked on each page under the top one, for BACK to return
-    /// to; one fewer than `stack`.
-    pub trail: Vec<Option<usize>>,
+    /// The row each page under the top one was left from, by URI, for
+    /// BACK to return to; one fewer than `stack`.
+    pub trail: Vec<Option<String>>,
+    /// The row BACK has just returned to, for the view to find and pick.
+    pub reselect: Option<String>,
     pub selected: Option<usize>,
+    /// The library kind last listed, which an empty box returns to.
+    pub library_kind: FindMode,
+    /// The rows last built for the list and what they were built from,
+    /// so a long list is not rebuilt every frame.
+    pub rows: RefCell<Option<(u64, Arc<Vec<FindRow>>)>>,
     /// Whether keys go to the box.
     pub focused: bool,
     /// Focus the box on the next frame it is open.
@@ -184,7 +221,10 @@ impl Default for FindState {
             mode: FindMode::default(),
             stack: vec![FindPage::Top],
             trail: Vec::new(),
+            reselect: None,
             selected: None,
+            library_kind: FindMode::default(),
+            rows: RefCell::new(None),
             focused: false,
             focus_requested: false,
             pending: None,
@@ -228,15 +268,13 @@ impl FindState {
             .map(|typed| SEARCH_DEBOUNCE.saturating_sub(now.saturating_duration_since(typed)))
     }
 
-    /// The box changed: the mode row follows it, the list goes back to the
-    /// top, and an emptied box lets go of the answer it showed.
+    /// The box changed: the list goes back to the top and keeps its kind,
+    /// RECENT turning into SONGS once there is something to search for,
+    /// and an emptied box lets go of the answer it showed.
     fn edit(&mut self, query: String) {
         if query.trim().is_empty() {
-            if !EMPTY_MODES.contains(&self.mode) {
-                self.mode = FindMode::Library;
-            }
             self.held = Held::default();
-        } else if !self.mode.is_search() {
+        } else if !self.mode.is_kind() {
             self.mode = FindMode::Songs;
         }
         if query != self.query {
@@ -245,6 +283,26 @@ impl FindState {
         self.query = query;
         self.stack.truncate(1);
         self.trail.clear();
+        self.reselect = None;
+        self.note_kind();
+    }
+
+    /// Remembers the library kind on show.
+    fn note_kind(&mut self) {
+        if self.query.trim().is_empty() && self.mode.is_kind() {
+            self.library_kind = self.mode;
+        }
+    }
+
+    /// The library, in the kind last listed: back to the top with the box
+    /// emptied.
+    pub fn show_library(&mut self) {
+        // Taken first: emptying the box would note a search's kind.
+        let kind = self.library_kind;
+        self.mode = kind;
+        self.edit(String::new());
+        self.pending = None;
+        self.selected = None;
     }
 
     fn search(&self) -> Vec<Action> {
@@ -256,15 +314,15 @@ impl FindState {
         }
     }
 
-    /// The modes the row offers: an artist's page has its own two, and
-    /// elsewhere they follow what the box holds.
+    /// The modes the row offers. Inside a page only its own: an artist's
+    /// songs and albums, and none for the others. At the top they follow
+    /// what the box holds.
     pub fn modes(&self) -> &'static [FindMode] {
-        if matches!(self.page(), FindPage::Artist { .. }) {
-            &ARTIST_MODES
-        } else if self.query.trim().is_empty() {
-            &EMPTY_MODES
-        } else {
-            &SEARCH_MODES
+        match self.page() {
+            FindPage::Artist { .. } => &ARTIST_MODES,
+            FindPage::Top if self.query.trim().is_empty() => &EMPTY_MODES,
+            FindPage::Top => &SEARCH_MODES,
+            _ => &[],
         }
     }
 
@@ -280,6 +338,9 @@ impl FindState {
     /// The next mode along the row, or the one before, wrapping.
     pub fn cycle_mode(&mut self, forward: bool) {
         let modes = self.modes();
+        if modes.is_empty() {
+            return;
+        }
         let shown = self.shown_mode();
         let at = modes.iter().position(|mode| *mode == shown).unwrap_or(0);
         let next = if forward {
@@ -290,31 +351,34 @@ impl FindState {
         self.pick_mode(modes[next]);
     }
 
-    /// A mode picked on the row: on an artist's page it switches between
-    /// their songs and albums; inside another page it goes back to the top
-    /// in that mode.
+    /// A mode picked on the row: at the top it switches the list; on an
+    /// artist's page between their songs and albums. It never leaves a
+    /// page.
     pub fn pick_mode(&mut self, mode: FindMode) {
         match self.page() {
             FindPage::Top => self.set_mode(mode),
             FindPage::Artist { .. } => self.set_artist_albums(mode == FindMode::Albums),
-            _ => self.leave_to(mode),
+            _ => {}
         }
     }
 
-    /// Switches the list to another mode.
+    /// Switches the top list to another mode.
     pub fn set_mode(&mut self, mode: FindMode) {
         if mode != self.mode {
             self.mode = mode;
             self.selected = None;
         }
+        self.note_kind();
     }
 
-    /// Back out of a page to the row it was opened from. False at the
-    /// top, where there is nowhere to go.
+    /// Back out of a page. False at the top, where there is nowhere to go.
+    /// The row the page was opened from waits in `reselect` for the view,
+    /// which knows where it now is.
     pub fn back(&mut self) -> bool {
         if self.stack.len() > 1 {
             self.stack.pop();
-            self.selected = self.trail.pop().flatten();
+            self.selected = None;
+            self.reselect = self.trail.pop().flatten();
             true
         } else {
             false
@@ -323,22 +387,20 @@ impl FindState {
 
     /// Opens a page on top of the one shown, from its first row.
     pub fn open(&mut self, page: FindPage) {
-        self.trail.push(self.selected.take());
+        self.open_from(page, None);
+    }
+
+    /// Opens a page from the row with `uri`, which BACK returns to.
+    pub fn open_from(&mut self, page: FindPage, uri: Option<String>) {
+        self.trail.push(uri);
+        self.selected = None;
+        self.reselect = None;
         self.stack.push(page);
     }
 
     /// The page shown.
     pub fn page(&self) -> &FindPage {
         self.stack.last().unwrap_or(&FindPage::Top)
-    }
-
-    /// Back to the top in `mode`, as a click on the mode row does from
-    /// inside a page.
-    pub fn leave_to(&mut self, mode: FindMode) {
-        self.stack.truncate(1);
-        self.trail.clear();
-        self.selected = None;
-        self.mode = mode;
     }
 
     /// An artist's page between their top songs and their albums.
@@ -356,7 +418,8 @@ impl FindState {
     /// artist's top songs and a radio, which Spotify has no context for,
     /// play as a list from the chosen song; a song found or recently
     /// played plays on its own, and Spotify's autoplay carries on after
-    /// it; Liked Songs play as the big window's page plays them. Artists,
+    /// it; Liked Songs (SONGS with the box empty) play as the big window's
+    /// page plays them. Artists,
     /// albums and playlists open inside FIND.
     pub fn choose(&self, row: &FindRow, rows: &[FindRow], index: usize) -> Choice {
         let id = || {
@@ -420,7 +483,7 @@ impl FindState {
                 let (uris, index) = songs();
                 Choice::Play(Action::PlayUris { uris, index })
             }
-            FindPage::Top if self.mode == FindMode::Library => {
+            FindPage::Top if self.mode == FindMode::Songs && self.query.trim().is_empty() => {
                 let (uris, index) = songs();
                 let context = match &row.context {
                     Some(uri) => RowContext::Context {
@@ -449,18 +512,7 @@ impl FindState {
             &items[..items.len().min(RESULT_LIMIT)]
         }
         fn names(artists: &[crate::api::models::ArtistRef]) -> String {
-            artists
-                .iter()
-                .map(|artist| artist.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
-        fn by(who: String, what: &str) -> String {
-            if who.is_empty() {
-                what.to_string()
-            } else {
-                format!("{who} - {what}")
-            }
+            crate::api::models::join_names(artists.iter().map(|artist| artist.name.as_str()))
         }
         let row = |uri: &str, label: String, kind: ItemKind| FindRow {
             uri: uri.to_string(),
@@ -468,25 +520,9 @@ impl FindState {
             kind,
             ..FindRow::default()
         };
-        let present = |uri: &Option<String>| uri.clone().filter(|uri| !uri.is_empty());
         match self.mode {
-            FindMode::Library | FindMode::Recent => Vec::new(),
-            FindMode::Songs => first(&results.tracks)
-                .iter()
-                .map(|track| FindRow {
-                    name: track.name.clone(),
-                    duration_ms: Some(track.duration_ms),
-                    album_uri: present(&track.album.as_ref().map(|album| album.uri.clone())),
-                    artist_uri: present(
-                        &track.artists.first().and_then(|artist| artist.uri.clone()),
-                    ),
-                    ..row(
-                        &track.uri,
-                        by(names(&track.artists), &track.name),
-                        ItemKind::Song,
-                    )
-                })
-                .collect(),
+            FindMode::Recent => Vec::new(),
+            FindMode::Songs => first(&results.tracks).iter().map(track_row).collect(),
             FindMode::Artists => first(&results.artists)
                 .iter()
                 .map(|artist| row(&artist.uri, artist.name.clone(), ItemKind::Artist))
@@ -497,7 +533,7 @@ impl FindState {
                     name: album.name.clone(),
                     ..row(
                         &album.uri,
-                        by(names(&album.artists), &album.name),
+                        by(&names(&album.artists), &album.name),
                         ItemKind::Album,
                     )
                 })
@@ -553,22 +589,85 @@ mod tests {
     }
 
     #[test]
-    fn typing_switches_to_search_modes_and_clearing_returns_to_library() {
+    fn typing_keeps_the_kind_and_recent_becomes_songs() {
         let mut s = FindState::default();
-        assert_eq!(s.mode, FindMode::Library);
+        assert_eq!(s.mode, FindMode::Songs, "an empty box opens on Liked Songs");
+        assert_eq!(
+            s.modes(),
+            &[
+                FindMode::Recent,
+                FindMode::Songs,
+                FindMode::Artists,
+                FindMode::Albums,
+                FindMode::Lists
+            ]
+        );
+        s.set_mode(FindMode::Artists);
         assert!(
             matches!(s.set_query("radiohead".into()).as_slice(), [Action::FindSearch(q)] if q == "radiohead")
         );
-        assert_eq!(s.mode, FindMode::Songs);
-        s.mode = FindMode::Albums;
-        s.set_query("radioheads".into());
-        assert_eq!(s.mode, FindMode::Albums);
+        assert_eq!(s.mode, FindMode::Artists, "typing searches the kind picked");
+        assert_eq!(s.modes(), &SEARCH_MODES);
+        s.set_mode(FindMode::Albums);
         assert!(s.set_query(String::new()).is_empty());
-        assert_eq!(s.mode, FindMode::Library);
-        assert_eq!(s.modes(), &[FindMode::Library, FindMode::Recent]);
-        s.mode = FindMode::Recent;
+        assert_eq!(s.mode, FindMode::Albums, "emptying the box keeps the kind");
+        s.set_mode(FindMode::Recent);
         s.set_query(String::new());
         assert_eq!(s.mode, FindMode::Recent, "an empty box keeps RECENT");
+        s.set_query("x".into());
+        assert_eq!(
+            s.mode,
+            FindMode::Songs,
+            "from RECENT, typing searches songs"
+        );
+    }
+
+    #[test]
+    fn show_library_returns_to_the_kind_last_listed() {
+        let mut s = FindState::default();
+        s.show_library();
+        assert_eq!(s.mode, FindMode::Songs, "Liked Songs at first");
+        s.set_mode(FindMode::Lists);
+        s.set_mode(FindMode::Recent);
+        s.set_query("radio".into());
+        s.set_mode(FindMode::Artists);
+        s.open(FindPage::Album {
+            id: "a".into(),
+            name: "A".into(),
+        });
+        s.selected = Some(2);
+        s.show_library();
+        assert_eq!(
+            s.mode,
+            FindMode::Lists,
+            "a search's kind is not the library's"
+        );
+        assert!(s.query.is_empty());
+        assert_eq!(s.stack, [FindPage::Top]);
+        assert_eq!(s.selected, None);
+        assert!(s.due(Instant::now() + Duration::from_secs(1)).is_empty());
+    }
+
+    #[test]
+    fn a_page_shows_only_its_own_modes_and_keeps_its_stack() {
+        let mut s = FindState::default();
+        s.open(FindPage::Artist {
+            id: "r".into(),
+            name: "R".into(),
+            albums: false,
+        });
+        assert_eq!(s.modes(), &[FindMode::Songs, FindMode::Albums]);
+        s.cycle_mode(true);
+        assert!(matches!(s.page(), FindPage::Artist { albums: true, .. }));
+        s.open(FindPage::Album {
+            id: "a".into(),
+            name: "A".into(),
+        });
+        assert!(s.modes().is_empty());
+        s.cycle_mode(true);
+        s.pick_mode(FindMode::Lists);
+        assert_eq!(s.stack.len(), 3, "Tab and the row never leave a page");
+        assert_eq!(s.mode, FindMode::Songs);
     }
 
     #[test]
@@ -629,10 +728,12 @@ mod tests {
     fn modes_cycle_within_the_row_shown() {
         let mut s = FindState::default();
         s.cycle_mode(true);
-        assert_eq!(s.mode, FindMode::Recent);
+        assert_eq!(s.mode, FindMode::Artists);
+        s.set_mode(FindMode::Lists);
         s.cycle_mode(true);
-        assert_eq!(s.mode, FindMode::Library);
+        assert_eq!(s.mode, FindMode::Recent);
         s.set_query("x".into());
+        assert_eq!(s.mode, FindMode::Songs);
         s.cycle_mode(false);
         assert_eq!(s.mode, FindMode::Lists);
         s.cycle_mode(true);
@@ -797,17 +898,11 @@ mod tests {
     #[test]
     fn a_liked_song_plays_in_liked_songs_as_the_big_window_does() {
         let s = FindState::default();
-        assert_eq!(s.mode, FindMode::Library);
-        let list = FindRow {
-            uri: "spotify:playlist:p".into(),
-            kind: ItemKind::Playlist,
-            ..row()
-        };
-        // Liked Songs follow the library's other kinds.
-        let rows = [list, song("a"), song("b")];
+        assert_eq!(s.mode, FindMode::Songs);
+        let rows = [song("a"), song("b")];
         // Not yet whole: the songs loaded, as a list.
         assert!(matches!(
-            s.choose(&rows[2], &rows, 2),
+            s.choose(&rows[1], &rows, 1),
             Choice::Play(Action::PlayFromRow { context: RowContext::Uris(uris), uri, index: 1 })
                 if uris.as_ref() == ["spotify:track:a", "spotify:track:b"] && uri == "spotify:track:b"
         ));
@@ -816,12 +911,12 @@ mod tests {
         let rows: Vec<FindRow> = rows
             .into_iter()
             .map(|row| FindRow {
-                context: (row.kind == ItemKind::Song).then(|| collection.clone()),
+                context: Some(collection.clone()),
                 ..row
             })
             .collect();
         assert!(matches!(
-            s.choose(&rows[1], &rows, 1),
+            s.choose(&rows[0], &rows, 0),
             Choice::Play(Action::PlayFromRow { context: RowContext::Context { uri, editable_playlist: None }, index: 0, .. })
                 if uri == collection
         ));
@@ -854,25 +949,31 @@ mod tests {
     }
 
     #[test]
-    fn back_returns_to_the_row_that_was_opened() {
+    fn back_returns_to_the_row_that_was_opened_by_uri() {
         let mut s = FindState {
             selected: Some(4),
             ..FindState::default()
         };
-        s.open(FindPage::Artist {
-            id: "r".into(),
-            name: "R".into(),
-            albums: false,
-        });
+        s.open_from(
+            FindPage::Artist {
+                id: "r".into(),
+                name: "R".into(),
+                albums: false,
+            },
+            Some("spotify:artist:r".into()),
+        );
         assert_eq!(s.selected, None);
-        s.selected = Some(1);
-        s.open(FindPage::Album {
-            id: "a".into(),
-            name: "A".into(),
-        });
+        s.open_from(
+            FindPage::Album {
+                id: "a".into(),
+                name: "A".into(),
+            },
+            Some("spotify:album:a".into()),
+        );
         assert!(s.back());
-        assert_eq!(s.selected, Some(1));
+        assert_eq!(s.reselect.as_deref(), Some("spotify:album:a"));
         assert!(s.back());
-        assert_eq!(s.selected, Some(4));
+        assert_eq!(s.reselect.as_deref(), Some("spotify:artist:r"));
+        assert_eq!(s.selected, None, "the view finds the row by its URI");
     }
 }

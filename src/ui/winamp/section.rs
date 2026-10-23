@@ -450,15 +450,22 @@ pub(super) struct ListResponse {
     pub secondary: Option<usize>,
 }
 
-/// The rows, in the skin's colours and the playlist's font, scrolled by
-/// the wheel and by the handle in the right-hand tiles. `scroll` is the
-/// first row in view and `wheel` the wheel's leftover, both kept by the
-/// caller between frames; middle-click scrolling writes the section's own
-/// scroll in `WinampState` after the frame.
-pub(super) fn list(
+/// `count` rows, in the skin's colours and the playlist's font, scrolled
+/// by the wheel and by the handle in the right-hand tiles. `row` makes the
+/// `index`th line, and is asked only for the rows in view, so a long list
+/// costs no more than a short one. `scroll` is the first row in view and
+/// `wheel` the wheel's leftover, both kept by the caller between frames;
+/// middle-click scrolling writes the section's own scroll in `WinampState`
+/// after the frame.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the list, its rows and the caller's scroll state are separate borrows"
+)]
+pub(super) fn list<'a>(
     view: &mut View,
     text: &mut PixelText,
-    rows: &[ListRow],
+    count: usize,
+    row: impl Fn(usize) -> ListRow<'a>,
     scroll: &mut usize,
     wheel: &mut f32,
     area: Area,
@@ -481,7 +488,7 @@ pub(super) fn list(
     };
 
     let visible = (area.height / layout::PLAYLIST_TRACK_HEIGHT) as usize;
-    let most = rows.len().saturating_sub(visible);
+    let most = count.saturating_sub(visible);
     // `contains_pointer`, not `hovered`: the rows drawn on top of the list
     // would take the hover and the wheel with it.
     if view
@@ -507,8 +514,8 @@ pub(super) fn list(
         .painter()
         .with_clip_rect(rect.intersect(view.ui.clip_rect()));
     let pad = 3;
-    for (offset, row) in rows.iter().skip(*scroll).take(visible).enumerate() {
-        let index = *scroll + offset;
+    for (offset, index) in (*scroll..count).take(visible).enumerate() {
+        let row = row(index);
         let line = Area::new(
             area.x,
             area.y + offset as u32 * layout::PLAYLIST_TRACK_HEIGHT,
