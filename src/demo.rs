@@ -1533,6 +1533,8 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.settings.eq_bands_db = crate::eq::PRESETS[13].bands_db;
             }
             "presets" => app.winamp.open_presets = true,
+            // DEV's menu open, as `g d` opens it.
+            "devices-menu" => app.winamp.open_devices = true,
             // A headphone correction saved as a preset, and in use.
             "eq-user-presets" => {
                 let bands_db = [1.2, 0.0, -1.9, -2.0, 0.0, 1.6, 1.6, 2.6, 0.0, -4.4];

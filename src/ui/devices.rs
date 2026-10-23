@@ -11,7 +11,9 @@ use crate::theme::{self, Icon};
 
 pub const BUTTON_RECT_ID: &str = "devices-button-rect";
 
-enum OutputRow {
+/// One output the picker offers: a device Spotify lists, or a receiver
+/// waiting on the local network.
+pub(crate) enum OutputRow {
     Device(Device),
     Receiver(crate::zeroconf::Receiver),
 }
@@ -34,7 +36,7 @@ impl OutputRow {
     }
 
     /// A stable UI identity even while nearby rows are inserted or reordered.
-    fn widget_key(&self) -> String {
+    pub(crate) fn widget_key(&self) -> String {
         match self {
             Self::Device(device) => format!("connect:{:?}:{}", device.id, device.name),
             Self::Receiver(receiver) => format!(
@@ -173,7 +175,12 @@ fn enable_playback_row(app: &mut App, ui: &mut egui::Ui) {
 /// A receiver announced on the local network but not yet in the account.
 /// Choosing it hands over the account, after which it behaves like any other
 /// Spotify Connect device.
-fn receiver_row(app: &mut App, ui: &mut egui::Ui, receiver: &crate::zeroconf::Receiver) {
+fn receiver_row(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    receiver: &crate::zeroconf::Receiver,
+    choice: Option<Action>,
+) {
     use egui::{Rect, Sense, Vec2, pos2, vec2};
     let palette = app.palette;
     let activating = app.activating_receiver.as_deref() == Some(receiver.name.as_str());
@@ -224,9 +231,10 @@ fn receiver_row(app: &mut App, ui: &mut egui::Ui, receiver: &crate::zeroconf::Re
         );
         theme::spinner(&mut spin, 16.0, palette.accent);
     }
-    if response.clicked() && !activating {
-        app.actions
-            .push(Action::ActivateReceiver(Box::new(receiver.clone())));
+    if response.clicked()
+        && let Some(action) = choice
+    {
+        app.actions.push(action);
     }
 }
 
@@ -373,6 +381,102 @@ fn output_picker(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+/// What the picker lists: this computer's id, the output playing now, and
+/// every output in the order shown. The big window's picker and the mini
+/// player's DEV menu both list these.
+pub(crate) struct Outputs {
+    pub local_id: Option<String>,
+    pub active_id: Option<String>,
+    pub rows: Vec<OutputRow>,
+}
+
+pub(crate) fn outputs(app: &App) -> Outputs {
+    let local_id = app.local_device_id.clone();
+    let mut devices: Vec<Device> = app.devices.clone();
+    if app.local_ready
+        && let Some(local_id) = &local_id
+        && !devices
+            .iter()
+            .any(|device| device.id.as_deref() == Some(local_id.as_str()))
+    {
+        devices.insert(
+            0,
+            Device {
+                id: Some(local_id.clone()),
+                // Named without its suffix; the row below adds it.
+                name: app.settings.device_name.clone(),
+                is_active: app.local.is_active(),
+                is_restricted: false,
+                volume_percent: Some(crate::app::volume_to_percent(app.local.volume)),
+                supports_volume: Some(true),
+                kind: "computer".into(),
+            },
+        );
+    }
+    let active_id = match app.target() {
+        crate::app::Target::Local => local_id.clone(),
+        crate::app::Target::Remote(id) => id,
+    };
+    // Spotify leaves a Sonos out of its list; it is offered from
+    // the network instead and driven over Connect.
+    for receiver in &app.receivers {
+        let listed = devices
+            .iter()
+            .any(|device| device.id.is_some() && device.id == receiver.device_id);
+        if !listed
+            && let Some(row) = crate::sonos::device_row(receiver, receiver.device_id == active_id)
+        {
+            devices.push(row);
+        }
+    }
+    name_devices(&mut devices, &app.receivers);
+    let mut seen = std::collections::HashSet::new();
+    devices.retain(|device| device.id.as_ref().is_none_or(|id| seen.insert(id.clone())));
+
+    // Receivers on the network that Spotify has not listed yet.
+    // They are real speakers the user can see in the official
+    // client, so offering them here is the whole point.
+    let waiting: Vec<crate::zeroconf::Receiver> = app
+        .receivers
+        .iter()
+        .filter(|receiver| !receiver_is_listed(receiver, &devices))
+        .cloned()
+        .collect();
+
+    let mut rows: Vec<_> = devices
+        .into_iter()
+        .map(OutputRow::Device)
+        .chain(waiting.into_iter().map(OutputRow::Receiver))
+        .collect();
+    rank_outputs(
+        &mut rows,
+        &app.device_history,
+        app.user_id(),
+        active_id.as_deref(),
+    );
+    Outputs {
+        local_id,
+        active_id,
+        rows,
+    }
+}
+
+/// What choosing a row asks for: a transfer, or a waiting receiver's
+/// sign-in; nothing for the output already playing, one without an id,
+/// or a receiver already connecting.
+pub(crate) fn choice(app: &App, row: &OutputRow, active_id: Option<&str>) -> Option<Action> {
+    match row {
+        OutputRow::Device(device) => device
+            .id
+            .as_ref()
+            .filter(|id| Some(id.as_str()) != active_id)
+            .map(|id| Action::Transfer(id.clone())),
+        OutputRow::Receiver(receiver) => (app.activating_receiver.as_deref()
+            != Some(receiver.name.as_str()))
+        .then(|| Action::ActivateReceiver(Box::new(receiver.clone()))),
+    }
+}
+
 pub fn popup(app: &mut App, ctx: &egui::Context) {
     if !app.show_devices {
         return;
@@ -420,71 +524,11 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                     });
                 });
                 ui.add_space(4.0);
-                let local_id = app.local_device_id.clone();
-                let mut devices: Vec<Device> = app.devices.clone();
-                if app.local_ready
-                    && let Some(local_id) = &local_id
-                    && !devices
-                        .iter()
-                        .any(|device| device.id.as_deref() == Some(local_id.as_str()))
-                {
-                    devices.insert(
-                        0,
-                        Device {
-                            id: Some(local_id.clone()),
-                            // Named without its suffix; the row below adds it.
-                            name: app.settings.device_name.clone(),
-                            is_active: app.local.is_active(),
-                            is_restricted: false,
-                            volume_percent: Some(crate::app::volume_to_percent(app.local.volume)),
-                            supports_volume: Some(true),
-                            kind: "computer".into(),
-                        },
-                    );
-                }
-                let active_id = match app.target() {
-                    crate::app::Target::Local => local_id.clone(),
-                    crate::app::Target::Remote(id) => id,
-                };
-                // Spotify leaves a Sonos out of its list; it is offered from
-                // the network instead and driven over Connect.
-                for receiver in &app.receivers {
-                    let listed = devices
-                        .iter()
-                        .any(|device| device.id.is_some() && device.id == receiver.device_id);
-                    if !listed
-                        && let Some(row) =
-                            crate::sonos::device_row(receiver, receiver.device_id == active_id)
-                    {
-                        devices.push(row);
-                    }
-                }
-                name_devices(&mut devices, &app.receivers);
-                let mut seen = std::collections::HashSet::new();
-                devices
-                    .retain(|device| device.id.as_ref().is_none_or(|id| seen.insert(id.clone())));
-
-                // Receivers on the network that Spotify has not listed yet.
-                // They are real speakers the user can see in the official
-                // client, so offering them here is the whole point.
-                let waiting: Vec<crate::zeroconf::Receiver> = app
-                    .receivers
-                    .iter()
-                    .filter(|receiver| !receiver_is_listed(receiver, &devices))
-                    .cloned()
-                    .collect();
-
-                let mut rows: Vec<_> = devices
-                    .into_iter()
-                    .map(OutputRow::Device)
-                    .chain(waiting.into_iter().map(OutputRow::Receiver))
-                    .collect();
-                rank_outputs(
-                    &mut rows,
-                    &app.device_history,
-                    app.user_id(),
-                    active_id.as_deref(),
-                );
+                let Outputs {
+                    local_id,
+                    active_id,
+                    rows,
+                } = outputs(app);
 
                 let max_height = (position.y - ctx.content_rect().top() - 62.0).clamp(52.0, 416.0);
                 crate::autoscroll::show(
@@ -517,7 +561,8 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                             ui.push_id(row.widget_key(), |ui| {
                                 let OutputRow::Device(device) = row else {
                                     if let OutputRow::Receiver(receiver) = row {
-                                        receiver_row(app, ui, receiver);
+                                        let choice = choice(app, row, active_id.as_deref());
+                                        receiver_row(app, ui, receiver, choice);
                                     }
                                     return;
                                 };
@@ -584,10 +629,9 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                                     ui.painter().circle_filled(dot, 4.0, palette.accent);
                                 }
                                 if response.clicked()
-                                    && !active
-                                    && let Some(id) = &device.id
+                                    && let Some(action) = choice(app, row, active_id.as_deref())
                                 {
-                                    app.actions.push(Action::Transfer(id.clone()));
+                                    app.actions.push(action);
                                 }
                             });
                         }

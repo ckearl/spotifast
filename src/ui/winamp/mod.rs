@@ -27,6 +27,7 @@ use crate::winamp::{MAX_SCALE, WinampState};
 
 use super::widgets::{SliderEvent, wheel_notches};
 
+mod devices;
 mod equalizer;
 pub(crate) mod find;
 mod item_menu;
@@ -915,9 +916,15 @@ pub(super) fn menu<R>(
         }
     };
     popup.style(style).show(|ui| {
+        // As tall as its rows, up to the window: not held to the height
+        // the popup had last frame, which a menu opening upwards, or one
+        // that egui moved up to fit, would otherwise never grow out of.
+        let limit = menu_limit(ui);
         crate::autoscroll::show(
             ui,
-            egui::ScrollArea::vertical().max_height(menu_limit(ui)),
+            egui::ScrollArea::vertical()
+                .min_scrolled_height(limit)
+                .max_height(limit),
             egui::Vec2b::new(false, true),
             contents,
         )
@@ -1305,13 +1312,27 @@ pub fn marquee_text(
 }
 
 fn marquee(app: &mut App, view: &mut View, now: Option<&NowPlaying>) {
-    // A key sequence's first key, waiting for its second, says so first.
+    // A key sequence's first key, waiting for its second, says so first;
+    // then the newer of the mini player's own announcement, such as the
+    // device just chosen, and the app's last notice.
+    let moment = Instant::now();
+    let announcement = app.winamp.announcement(moment);
+    if let Some((text, since)) = announcement {
+        let left = crate::winamp::announcement_lasts(text)
+            .saturating_sub(moment.saturating_duration_since(since));
+        view.ui.ctx().request_repaint_after(left);
+    }
+    let toast = app.toasts.last();
     let notice = app
         .winamp
         .keys
         .pending_label()
         .map(str::to_string)
-        .or_else(|| app.toasts.last().map(|toast| toast.message.clone()));
+        .or_else(|| match (announcement, toast) {
+            (Some((_, since)), Some(toast)) if toast.created > since => Some(toast.message.clone()),
+            (Some((text, _)), _) => Some(text.to_string()),
+            (None, toast) => toast.map(|toast| toast.message.clone()),
+        });
     let text = marquee_text(
         app.locale,
         now,
@@ -1557,7 +1578,7 @@ fn windows_buttons(app: &mut App, view: &mut View) {
 /// are written in its font, along the strip under the transport that
 /// Winamp's skins leave blank. A section's switch is lit while it is open
 /// and dim while it is closed, and its label drops a pixel while held, as
-/// a pressed button does. DEV will open the device menu.
+/// a pressed button does. DEV opens the device menu.
 fn section_toggles(app: &mut App, view: &mut View) {
     let locale = app.locale;
     let toggles = [
@@ -1590,7 +1611,9 @@ fn section_toggles(app: &mut App, view: &mut View) {
         let response = view
             .interact(area, &format!("toggle-{label}"), Sense::click())
             .on_hover_text(hint.as_ref());
-        let lit = section.is_some_and(|section| app.settings.section_open(section));
+        let menu_open = section.is_none()
+            && egui::Popup::is_id_open(view.ui.ctx(), egui::Popup::default_response_id(&response));
+        let lit = menu_open || section.is_some_and(|section| app.settings.section_open(section));
         let held = response.is_pointer_button_down_on();
         let width = 5 * label.len() as u32;
         view.text_tinted(
@@ -1607,10 +1630,12 @@ fn section_toggles(app: &mut App, view: &mut View) {
                 TOGGLE_DIM
             },
         );
-        if response.clicked()
-            && let Some(section) = section
-        {
-            app.actions.push(Action::ToggleWinampSection(section));
+        match section {
+            Some(section) if response.clicked() => {
+                app.actions.push(Action::ToggleWinampSection(section));
+            }
+            Some(_) => {}
+            None => devices::popup(app, view.skin, view.unit, &response),
         }
     }
 }

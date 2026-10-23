@@ -23,6 +23,8 @@ pub const MARQUEE_CHARS: usize = 31;
 const MARQUEE_FITS: usize = 30;
 /// How long the marquee waits between one-character steps.
 const MARQUEE_STEP: Duration = Duration::from_millis(220);
+/// How long an announcement that fits stays in the marquee.
+const ANNOUNCEMENT_STILL: Duration = Duration::from_secs(3);
 /// What separates the end of a scrolling title from its start again.
 const MARQUEE_GAP: &str = "  ***  ";
 
@@ -123,6 +125,9 @@ pub struct WinampState {
     pub playlist_picker_for: Option<crate::ui::winamp::find::state::FindRow>,
     /// Open the devices menu on the next frame; `g d` asks for it.
     pub open_devices: bool,
+    /// What the marquee says once, such as the device just chosen, and
+    /// when it began saying it.
+    announcement: Option<(String, Instant)>,
     pub lyrics_scroll: usize,
     pub lyrics_wheel: f32,
     /// The leftover of a section's corner drag; one is dragged at a time.
@@ -180,6 +185,7 @@ impl WinampState {
             keys: Default::default(),
             playlist_picker_for: None,
             open_devices: false,
+            announcement: None,
             lyrics_scroll: 0,
             lyrics_wheel: 0.0,
             section_resize: 0.0,
@@ -349,10 +355,32 @@ impl WinampState {
         (shown, offset)
     }
 
+    /// Has the marquee say `text` once, from `now`.
+    pub fn announce(&mut self, text: String, now: Instant) {
+        self.announcement = Some((text, now));
+    }
+
+    /// What the marquee is announcing at `now` and since when: a short
+    /// line for a few seconds, a long one for one pass through the window.
+    pub fn announcement(&self, now: Instant) -> Option<(&str, Instant)> {
+        let (text, since) = self.announcement.as_ref()?;
+        (now.saturating_duration_since(*since) <= announcement_lasts(text))
+            .then_some((text.as_str(), *since))
+    }
+
     /// Whether the marquee is on the move, and so wants frames.
     pub fn marquee_scrolling(&self) -> bool {
         self.marquee_text.chars().count() > MARQUEE_FITS
     }
+}
+
+/// How long the marquee holds an announcement.
+pub fn announcement_lasts(text: &str) -> Duration {
+    let chars = text.chars().count();
+    if chars <= MARQUEE_FITS {
+        return ANNOUNCEMENT_STILL;
+    }
+    MARQUEE_STEP * (chars + MARQUEE_GAP.chars().count()) as u32
 }
 
 fn is_archive_extension(extension: &str) -> bool {
