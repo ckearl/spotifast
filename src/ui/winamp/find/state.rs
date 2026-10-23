@@ -76,6 +76,7 @@ pub fn track_row(track: &Track) -> FindRow {
         album_uri: present(track.album.as_ref().map(|album| &album.uri)),
         artist_uri: present(track.artists.first().and_then(|artist| artist.uri.as_ref())),
         context: None,
+        position: None,
     }
 }
 
@@ -114,6 +115,10 @@ pub struct FindRow {
     /// The context a Liked Songs row plays in: the collection, once the
     /// list is whole, as the big window's Liked Songs page plays it.
     pub context: Option<String>,
+    /// Where the row sits in the list it was drawn from, as that list
+    /// counts: a playlist's server position, so taking it out takes only
+    /// this copy; PL's place in the queue, so playing it plays from there.
+    pub position: Option<u32>,
 }
 
 /// What choosing a row does: play, or open a page inside FIND.

@@ -334,7 +334,8 @@ fn rows(app: &App, now: Option<&NowPlaying>) -> (Vec<Row>, Vec<String>) {
     (rows, uris)
 }
 
-/// A line as FIND has it, for the actions every list shares.
+/// A line as FIND has it, for the actions every list shares; a queued
+/// row keeps its place in the queue, to play from there.
 fn item_row(row: &Row) -> FindRow {
     FindRow {
         uri: row.uri.clone(),
@@ -351,6 +352,7 @@ fn item_row(row: &Row) -> FindRow {
             .as_ref()
             .map(|id| format!("spotify:artist:{id}")),
         context: None,
+        position: row.queued.and_then(|index| u32::try_from(index).ok()),
     }
 }
 
@@ -447,7 +449,7 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
                 selection.clear();
                 selection.insert(index);
             }
-            opened = Some((item_row(row), None));
+            opened = Some((item_row(row), Some(RowContext::Queue)));
         }
         if response.double_clicked()
             && let Some(index) = row.queued

@@ -777,7 +777,7 @@ pub(crate) fn add_to_playlist_menu(ui: &mut Ui, app: &mut App, items: &[Playable
         &palette,
         Some(Icon::ListPlus),
         &gettext(app.locale, "Add to playlist"),
-        |ui| kept_playlist_picker(ui, app, items, query_id),
+        |ui| kept_playlist_picker(ui, app, items, query_id, true),
     );
     if opened.is_none() {
         ui.data_mut(|data| data.remove::<(u64, String)>(query_id));
@@ -786,11 +786,13 @@ pub(crate) fn add_to_playlist_menu(ui: &mut Ui, app: &mut App, items: &[Playable
 
 /// [`playlist_picker`] with its filter kept under `query_id` while it is
 /// drawn frame after frame, and the field focused when it first shows.
+/// `new_playlist` offers making one, whose dialog only the big window draws.
 pub(crate) fn kept_playlist_picker(
     ui: &mut Ui,
     app: &mut App,
     items: &[PlayableItem],
     query_id: egui::Id,
+    new_playlist: bool,
 ) {
     let frame = ui.ctx().cumulative_frame_nr();
     let previous = ui
@@ -798,7 +800,7 @@ pub(crate) fn kept_playlist_picker(
         .filter(|(last_frame, _)| frame.saturating_sub(*last_frame) <= 1);
     let fresh = previous.is_none();
     let mut query = previous.map(|(_, query)| query).unwrap_or_default();
-    let field = playlist_picker(ui, app, items, &mut query);
+    let field = playlist_picker_with(ui, app, items, &mut query, new_playlist);
     if fresh {
         field.request_focus();
     }
@@ -812,6 +814,17 @@ pub(crate) fn playlist_picker(
     app: &mut App,
     items: &[PlayableItem],
     query: &mut String,
+) -> egui::Response {
+    playlist_picker_with(ui, app, items, query, true)
+}
+
+/// [`playlist_picker`], with "New playlist" only when `new_playlist`.
+fn playlist_picker_with(
+    ui: &mut Ui,
+    app: &mut App,
+    items: &[PlayableItem],
+    query: &mut String,
+    new_playlist: bool,
 ) -> egui::Response {
     let palette = app.palette;
     let locale = app.locale;
@@ -879,19 +892,21 @@ pub(crate) fn playlist_picker(
         highlighted = (!query.trim().is_empty()).then_some(0);
     }
     ui.add_space(4.0);
-    if menu_item(
-        ui,
-        &palette,
-        Some(Icon::Plus),
-        &gettext(locale, "New playlist"),
-    ) {
-        app.actions.push(Action::ShowDialog(Dialog::CreatePlaylist {
-            name: String::new(),
-            public: false,
-            add_uris: items.iter().map(|item| item.uri().to_string()).collect(),
-        }));
+    if new_playlist {
+        if menu_item(
+            ui,
+            &palette,
+            Some(Icon::Plus),
+            &gettext(locale, "New playlist"),
+        ) {
+            app.actions.push(Action::ShowDialog(Dialog::CreatePlaylist {
+                name: String::new(),
+                public: false,
+                add_uris: items.iter().map(|item| item.uri().to_string()).collect(),
+            }));
+        }
+        menu_separator(ui, &palette);
     }
-    menu_separator(ui, &palette);
     let needle = query.trim().to_lowercase();
     let matches: Vec<_> = playlists
         .iter()

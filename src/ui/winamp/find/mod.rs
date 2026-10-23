@@ -128,6 +128,23 @@ fn item_row(uri: &str, label: String, name: &str, kind: ItemKind) -> FindRow {
     }
 }
 
+/// A playlist's song or episode as a row.
+fn item_row_of(item: &PlayableItem) -> FindRow {
+    match item {
+        PlayableItem::Track(track) => track_row(track),
+        PlayableItem::Episode(episode) => FindRow {
+            uri: episode.uri.clone(),
+            label: state::by(
+                episode.show.as_ref().map_or("", |show| &show.name),
+                &episode.name,
+            ),
+            name: episode.name.clone(),
+            duration_ms: Some(episode.duration_ms),
+            ..FindRow::default()
+        },
+    }
+}
+
 /// A list Spotify answers whole: a radio's songs, an artist's top songs,
 /// the songs played lately.
 fn whole<'a, T>(
@@ -385,21 +402,21 @@ fn source<'a>(app: &'a App, page: &'a FindPage) -> (Listing, Build<'a>) {
                         if failed {
                             return Vec::new();
                         }
+                        // Each row keeps its server position, so taking
+                        // a song out takes only that copy.
+                        let base = items.base_offset;
                         items
                             .items
                             .iter()
-                            .filter_map(|item| match item.playable()? {
-                                PlayableItem::Track(track) => Some(track_row(track)),
-                                PlayableItem::Episode(episode) => Some(FindRow {
-                                    uri: episode.uri.clone(),
-                                    label: state::by(
-                                        episode.show.as_ref().map_or("", |show| &show.name),
-                                        &episode.name,
-                                    ),
-                                    name: episode.name.clone(),
-                                    duration_ms: Some(episode.duration_ms),
-                                    ..FindRow::default()
-                                }),
+                            .enumerate()
+                            .filter_map(|(at, item)| {
+                                let row = item_row_of(item.playable()?);
+                                Some(FindRow {
+                                    position: u32::try_from(at)
+                                        .ok()
+                                        .and_then(|at| base.checked_add(at)),
+                                    ..row
+                                })
                             })
                             .collect()
                     }),
@@ -1769,6 +1786,71 @@ mod tests {
             FindPage::Radio { seed, .. } if *seed == song.uri
         ));
         assert!(!app.actions.iter().any(|a| matches!(a, Action::Open(_))));
+        app.backend.shutdown();
+    }
+
+    /// The menu's Play does what double-click and PLAY do on the same
+    /// row: an artist's or a radio's songs play as their list, Liked
+    /// Songs as the big window's page plays them.
+    #[test]
+    fn the_menus_play_is_double_clicks_play() {
+        let mut app = searched_app();
+        let same = |app: &mut App, index: usize| {
+            let rows = visible_rows(app);
+            app.actions.clear();
+            choose(app, &rows, index);
+            let chosen = format!("{:?}", app.actions);
+            app.actions.clear();
+            let context = row_context(app);
+            item_menu::perform(app, &rows[index], ItemAction::Play, context.as_ref());
+            assert_eq!(format!("{:?}", app.actions), chosen);
+            chosen
+        };
+        // Liked Songs, the box empty.
+        assert!(same(&mut app, 2).contains("PlayFromRow"));
+        app.winamp.find.open(FindPage::Artist {
+            id: "art0".into(),
+            name: "R".into(),
+            albums: false,
+        });
+        assert!(same(&mut app, 3).contains("PlayUris"));
+        app.backend.shutdown();
+    }
+
+    /// A playlist's rows keep their server positions, so taking a song
+    /// out takes only that copy.
+    #[test]
+    fn a_playlists_rows_remove_only_their_own_copy() {
+        let mut app = searched_app();
+        app.winamp.find.open(FindPage::Playlist {
+            id: "pl1".into(),
+            name: "P".into(),
+        });
+        let rows = visible_rows(&app);
+        assert!(rows.len() > 2);
+        let base = app.playlist_pages["pl1"].items.base_offset;
+        for (at, row) in rows.iter().enumerate() {
+            assert_eq!(row.position, Some(base + at as u32), "{}", row.label);
+        }
+        let own = RowContext::Context {
+            uri: "spotify:playlist:pl1".into(),
+            editable_playlist: Some(("pl1".into(), None)),
+        };
+        app.actions.clear();
+        item_menu::perform(
+            &mut app,
+            &rows[2],
+            ItemAction::RemoveFromPlaylist,
+            Some(&own),
+        );
+        assert!(
+            matches!(
+                app.actions.as_slice(),
+                [Action::RemoveFromPlaylist { positions, .. }] if *positions == [base + 2]
+            ),
+            "{:?}",
+            app.actions
+        );
         app.backend.shutdown();
     }
 

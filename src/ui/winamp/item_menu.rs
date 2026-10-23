@@ -13,11 +13,11 @@ use egui::Ui;
 use crate::api::models::{Album, ArtistRef, PlayableItem, Track};
 use crate::app::App;
 use crate::i18n::{gettext, pgettext};
-use crate::model::{Action, Loadable, Page, RowContext, WinampSection};
+use crate::model::{Action, Loadable, RowContext, WinampSection};
 use crate::util;
 
 use super::View;
-use super::find::state::{FindPage, FindRow, ItemKind};
+use super::find::state::{Choice, FindPage, FindRow, ItemKind};
 
 /// One thing to do to a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -289,29 +289,29 @@ fn radio_page(app: &App, row: &FindRow) -> Option<FindPage> {
     })
 }
 
-/// A playlist's songs, when every one of them is held: a playlist is
-/// queued song by song, and a part of it would be queued as the whole.
-fn playlist_songs(app: &App, row: &FindRow) -> Option<Vec<(String, String)>> {
-    let id = util::uri_id(&row.uri)?;
-    let items = &app.playlist_pages.get(id)?.items;
-    items.is_complete().then(|| {
-        items
-            .items
-            .iter()
-            .filter_map(|entry| entry.playable())
-            .filter(|item| !item.uri().is_empty())
-            .map(|item| {
-                let label = super::find::state::by(&item.subtitle(), item.name());
-                (item.uri().to_string(), label)
-            })
-            .collect()
-    })
+/// Whether the row is a playlist the account owns. Unfollowing one's own
+/// playlist deletes it, which the big window asks to confirm, so it is
+/// not offered here.
+fn owned_playlist(app: &App, row: &FindRow) -> bool {
+    if row.kind != ItemKind::Playlist {
+        return false;
+    }
+    let (Some(user), Some(id)) = (app.user_id(), util::uri_id(&row.uri)) else {
+        return false;
+    };
+    app.library
+        .playlists
+        .get()
+        .and_then(|lists| lists.iter().find(|list| list.id == id))
+        .or_else(|| app.playlist_pages.get(id)?.playlist.get())
+        .is_some_and(|list| list.owned_by(user))
 }
 
 /// Whether an action can be done to the row now.
 fn available(app: &App, row: &FindRow, action: ItemAction) -> bool {
     match action {
-        Play | ToggleSaved => !row.uri.is_empty(),
+        Play => !row.uri.is_empty(),
+        ToggleSaved => !row.uri.is_empty() && !owned_playlist(app, row),
         PlayNext => {
             app.queue_locally_reorderable()
                 && app.can_queue(&row.uri)
@@ -319,8 +319,7 @@ fn available(app: &App, row: &FindRow, action: ItemAction) -> bool {
         }
         AddToQueue => match row.kind {
             ItemKind::Song => app.can_queue(&row.uri),
-            ItemKind::Album => true,
-            ItemKind::Playlist => playlist_songs(app, row).is_some_and(|songs| !songs.is_empty()),
+            ItemKind::Album | ItemKind::Playlist => true,
             ItemKind::Artist => false,
         },
         AddToPlaylist => playable(app, row).is_some(),
@@ -351,8 +350,8 @@ pub(super) fn label(app: &App, row: &FindRow, action: ItemAction) -> Cow<'static
                 (ItemKind::Song, false) => pgettext(locale, "song", "Like"),
                 (ItemKind::Artist, true) => pgettext(locale, "artist", "Unfollow"),
                 (ItemKind::Artist, false) => pgettext(locale, "artist", "Follow"),
-                (_, true) => gettext(locale, "Remove from library"),
-                (_, false) => gettext(locale, "Save to library"),
+                (_, true) => gettext(locale, "Remove from Your Library"),
+                (_, false) => gettext(locale, "Add to Your Library"),
             }
         }
         RemoveFromPlaylist => gettext(locale, "Remove from this playlist"),
@@ -380,6 +379,40 @@ fn open_in_find(app: &mut App, page: FindPage, from: &FindRow) {
     }
 }
 
+/// Play on a song plays it as its own list does: PL's queue from that
+/// row, or the playing song again from its start; FIND's rows as
+/// double-click and PLAY play them. False when the song is in neither,
+/// for [`perform`] to play it from its context alone.
+fn play_where_listed(app: &mut App, row: &FindRow, context: Option<&RowContext>) -> bool {
+    if matches!(context, Some(RowContext::Queue)) {
+        match row.position {
+            Some(index) => app.actions.push(Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: row.uri.clone(),
+                index,
+            }),
+            // The playing row: it starts over, where it is.
+            None => {
+                if app.now_playing().is_some_and(|now| now.uri == row.uri) {
+                    app.actions.push(Action::Seek(0));
+                }
+            }
+        }
+        return true;
+    }
+    let rows = super::find::visible_rows(app);
+    let Some(index) = rows.iter().position(|shown| shown == row) else {
+        return false;
+    };
+    match app.winamp.find.choose(row, &rows, index) {
+        Choice::Play(action) => {
+            app.actions.push(action);
+            true
+        }
+        Choice::Open(_) => false,
+    }
+}
+
 /// Does `action` to `row`, which sits in `context` when it is one of a
 /// list's songs. Anything Spotify hears of goes as an `Action`; the pages
 /// it goes to open inside FIND.
@@ -394,6 +427,9 @@ pub(super) fn perform(
     }
     match action {
         Play => {
+            if row.kind == ItemKind::Song && play_where_listed(app, row, context) {
+                return;
+            }
             let list = match (row.kind, context) {
                 (ItemKind::Song, Some(RowContext::Context { uri, .. })) => Some(uri.clone()),
                 (
@@ -427,18 +463,14 @@ pub(super) fn perform(
                 app.actions.push(Action::PlayNext { items: vec![item] });
             }
         }
-        AddToQueue => {
-            if row.kind == ItemKind::Playlist {
-                if let Some(songs) = playlist_songs(app, row) {
-                    app.actions.push(Action::QueueMany { songs });
-                }
-            } else {
-                app.actions.push(Action::AddToQueue {
-                    uri: row.uri.clone(),
-                    label: row.label.clone(),
-                });
-            }
-        }
+        // A playlist's songs are queued once its pages have all come.
+        AddToQueue => app.actions.push(Action::AddToQueue {
+            uri: row.uri.clone(),
+            label: match row.kind {
+                ItemKind::Song => row.label.clone(),
+                _ => own_name(row).to_string(),
+            },
+        }),
         // A menu of its own: the menu and +LIST draw the playlists.
         AddToPlaylist => {}
         ToggleSaved => app.actions.push(Action::ToggleSaved(row.uri.clone())),
@@ -447,7 +479,8 @@ pub(super) fn perform(
                 app.actions.push(Action::RemoveFromPlaylist {
                     playlist_id: id.to_string(),
                     uris: vec![row.uri.clone()],
-                    positions: Vec::new(),
+                    // Only this copy of a song the list holds twice.
+                    positions: row.position.into_iter().collect(),
                 });
             }
         }
@@ -479,15 +512,11 @@ pub(super) fn menu(app: &mut App, ui: &mut Ui, row: &FindRow, context: Option<&R
         .get(&egui::TextStyle::Button)
         .map_or(10.0, |font| font.size);
     ui.set_min_width(font * 11.0);
-    // A playlist's songs are queued from its page, which is asked for here
-    // when nothing of it is held.
-    if row.kind == ItemKind::Playlist
-        && let Some(id) = util::uri_id(&row.uri)
-        && !app.playlist_pages.contains_key(id)
-    {
-        app.ensure_loaded(Page::Playlist(id.to_string()));
-    }
     for &action in actions_for(row.kind, in_own_playlist(context)) {
+        // Not offered rather than greyed out: deleting is the big window's.
+        if action == ToggleSaved && owned_playlist(app, row) {
+            continue;
+        }
         if matches!(action, GoToArtist | CopyLink)
             || (action == Radio && row.kind != ItemKind::Song)
         {
@@ -522,7 +551,8 @@ pub(super) fn menu(app: &mut App, ui: &mut Ui, row: &FindRow, context: Option<&R
 /// menu holding them closes once one is chosen.
 fn pick_playlist(app: &mut App, ui: &mut Ui, item: &PlayableItem, query: egui::Id) {
     let before = app.actions.len();
-    crate::ui::widgets::kept_playlist_picker(ui, app, std::slice::from_ref(item), query);
+    // No "New playlist": its dialog is drawn only in the big window.
+    crate::ui::widgets::kept_playlist_picker(ui, app, std::slice::from_ref(item), query, false);
     if app.actions.len() > before {
         ui.close();
     }
@@ -626,6 +656,7 @@ mod tests {
             album_uri: Some("spotify:album:a".into()),
             artist_uri: Some("spotify:artist:r".into()),
             context: None,
+            position: None,
         }
     }
 
@@ -747,14 +778,14 @@ mod tests {
         let toggle = |app: &App, row: &FindRow| label(app, row, ItemAction::ToggleSaved);
         assert_eq!(toggle(&app, &song()), "Like");
         assert_eq!(toggle(&app, &artist), "Follow");
-        assert_eq!(toggle(&app, &album), "Save to library");
+        assert_eq!(toggle(&app, &album), "Add to Your Library");
         for row in [&song(), &artist, &album, &list] {
             app.saved.insert(row.uri.clone(), true);
         }
         assert_eq!(toggle(&app, &song()), "Unlike");
         assert_eq!(toggle(&app, &artist), "Unfollow");
-        assert_eq!(toggle(&app, &album), "Remove from library");
-        assert_eq!(toggle(&app, &list), "Remove from library");
+        assert_eq!(toggle(&app, &album), "Remove from Your Library");
+        assert_eq!(toggle(&app, &list), "Remove from Your Library");
 
         // Unliking shows at once, before Spotify answers.
         perform(&mut app, &song(), ItemAction::ToggleSaved, None);
@@ -778,23 +809,24 @@ mod tests {
         };
         assert!(in_own_playlist(Some(&own)));
         assert!(!in_own_playlist(None));
-        perform(
-            &mut app,
-            &song(),
-            ItemAction::RemoveFromPlaylist,
-            Some(&own),
-        );
+        // The third row of a playlist holding the song more than once.
+        let copy = FindRow {
+            position: Some(7),
+            ..song()
+        };
+        perform(&mut app, &copy, ItemAction::RemoveFromPlaylist, Some(&own));
         assert!(
             matches!(
                 app.actions.as_slice(),
                 [
                     Action::AddToQueue { uri, .. },
                     Action::CopyLink(link),
-                    Action::RemoveFromPlaylist { playlist_id, uris, .. },
+                    Action::RemoveFromPlaylist { playlist_id, uris, positions },
                 ] if uri == "spotify:track:t"
                     && link == "spotify:track:t"
                     && playlist_id == "mine"
                     && *uris == ["spotify:track:t"]
+                    && *positions == [7]
             ),
             "{:?}",
             app.actions
@@ -857,6 +889,141 @@ mod tests {
             "{:?}",
             app.actions
         );
+        app.backend.shutdown();
+    }
+
+    /// PL plays as its double-click does: the queue from the queued row,
+    /// and the playing row starts over where it is, never as a lone song.
+    #[test]
+    fn play_on_a_pl_row_plays_the_queue_from_it() {
+        let mut app = test_app();
+        crate::demo::populate(&mut app);
+        let queue = Some(&RowContext::Queue);
+        let queued = FindRow {
+            position: Some(1),
+            ..song()
+        };
+        perform(&mut app, &queued, ItemAction::Play, queue);
+        assert!(
+            matches!(
+                app.actions.as_slice(),
+                [Action::PlayFromRow { context: RowContext::Queue, uri, index: 1 }]
+                    if uri == "spotify:track:t"
+            ),
+            "{:?}",
+            app.actions
+        );
+        app.actions.clear();
+        let playing = FindRow {
+            uri: app.now_playing().unwrap().uri,
+            ..song()
+        };
+        perform(&mut app, &playing, ItemAction::Play, queue);
+        assert!(
+            matches!(app.actions.as_slice(), [Action::Seek(0)]),
+            "{:?}",
+            app.actions
+        );
+        app.actions.clear();
+        // A row no longer playing does nothing rather than play alone.
+        perform(&mut app, &song(), ItemAction::Play, queue);
+        assert!(app.actions.is_empty(), "{:?}", app.actions);
+        app.backend.shutdown();
+    }
+
+    /// Unfollowing one's own playlist deletes it: not offered here, where
+    /// there is no asking first. A playlist someone else made still is.
+    #[test]
+    fn an_owned_playlist_is_never_unfollowed_from_the_menu() {
+        let mut app = test_app();
+        crate::demo::populate(&mut app);
+        let lists = app.library.playlists.get().unwrap();
+        let row = |owner: &str| {
+            let list = lists
+                .iter()
+                .find(|list| list.owner.id.as_deref() == Some(owner))
+                .unwrap();
+            FindRow {
+                uri: list.uri.clone(),
+                label: list.name.clone(),
+                kind: ItemKind::Playlist,
+                ..FindRow::default()
+            }
+        };
+        let (mine, theirs) = (row("demo"), row("spotify"));
+        assert!(!available(&app, &mine, ItemAction::ToggleSaved));
+        assert!(available(&app, &theirs, ItemAction::ToggleSaved));
+        perform(&mut app, &mine, ItemAction::ToggleSaved, None);
+        assert!(app.actions.is_empty(), "{:?}", app.actions);
+        perform(&mut app, &theirs, ItemAction::ToggleSaved, None);
+        assert!(matches!(app.actions.as_slice(), [Action::ToggleSaved(_)]));
+        app.backend.shutdown();
+    }
+
+    /// A playlist is queued whole, however much of it FIND has loaded:
+    /// the app loads the rest (see `App::queue_playlist`).
+    #[test]
+    fn a_playlist_is_queued_whatever_of_it_is_loaded() {
+        let mut app = test_app();
+        let list = FindRow {
+            uri: "spotify:playlist:p".into(),
+            label: "Mix".into(),
+            kind: ItemKind::Playlist,
+            ..FindRow::default()
+        };
+        assert!(available(&app, &list, ItemAction::AddToQueue));
+        perform(&mut app, &list, ItemAction::AddToQueue, None);
+        assert!(
+            matches!(
+                app.actions.as_slice(),
+                [Action::AddToQueue { uri, label }] if uri == "spotify:playlist:p" && label == "Mix"
+            ),
+            "{:?}",
+            app.actions
+        );
+        app.backend.shutdown();
+    }
+
+    /// The labels of the buttons in one frame of `draw`.
+    fn buttons(ctx: &egui::Context, draw: impl FnMut(&mut Ui)) -> Vec<String> {
+        let mut output = ctx.run_ui(egui::RawInput::default(), draw);
+        output.textures_delta.clear();
+        let tree = output.platform_output.accesskit_update.unwrap();
+        tree.nodes
+            .iter()
+            .filter_map(|(_, node)| node.label().map(str::to_string))
+            .collect()
+    }
+
+    /// "New playlist" opens a dialog only the big window draws, so the
+    /// mini player's picker leaves it out; the big window's keeps it.
+    #[test]
+    fn the_mini_players_picker_offers_no_new_playlist() {
+        let mut app = test_app();
+        crate::demo::populate(&mut app);
+        let item = playable(&app, &song()).unwrap();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let id = egui::Id::new("picker");
+        let mini = buttons(&ctx, |ui| pick_playlist(&mut app, ui, &item, id));
+        assert!(
+            !mini.iter().any(|label| label == "New playlist"),
+            "{mini:?}"
+        );
+        assert!(
+            mini.iter().any(|label| label == "Late night focus"),
+            "{mini:?}"
+        );
+        let big = buttons(&ctx, |ui| {
+            crate::ui::widgets::kept_playlist_picker(
+                ui,
+                &mut app,
+                std::slice::from_ref(&item),
+                id,
+                true,
+            )
+        });
+        assert!(big.iter().any(|label| label == "New playlist"), "{big:?}");
         app.backend.shutdown();
     }
 }
