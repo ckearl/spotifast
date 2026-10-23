@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 
 use egui::{Color32, Event, Key, Sense};
 
+use crate::api::models::{PlayableItem, Track};
 use crate::app::App;
 use crate::i18n::gettext;
-use crate::model::{Action, Loadable, WinampSection};
+use crate::model::{Action, Loadable, Page, WinampSection};
 use crate::skin::layout::{self, Area};
 use crate::util;
 
@@ -23,11 +24,11 @@ use super::{PixelText, View};
 pub mod state;
 
 pub use state::FindState;
-use state::{FindRow, ItemKind};
+use state::{Choice, FindMode, FindPage, FindRow, ItemKind};
 
 /// One row of text, as the playlist's.
 const ROW: u32 = layout::PLAYLIST_TRACK_HEIGHT;
-/// The bottom bar. +LIST and RADIO arrive with the actions and pages.
+/// The bottom bar. +LIST and RADIO arrive with the actions.
 const BUTTONS: [&str; 5] = ["PLAY", "+QUEUE", "+LIST", "RADIO", "BACK"];
 const PLAY: usize = 0;
 const QUEUE: usize = 1;
@@ -53,18 +54,14 @@ fn arrived(app: &App) -> (bool, bool) {
     (catalogue, lists)
 }
 
-/// The rows the list shows. The answer is shown only for what the box
-/// holds, and only once the mode's own half of it has come; until then the
-/// last answer shown stays, so the rows never belong to a query the user
-/// has typed past, nor flicker away.
-pub(super) fn visible_rows(app: &App) -> Vec<FindRow> {
+/// The search results the list shows. The answer is shown only for what
+/// the box holds, and only once the mode's own half of it has come; until
+/// then the last answer shown stays, so the rows never belong to a query
+/// the user has typed past, nor flicker away.
+fn search_rows(app: &App) -> Vec<FindRow> {
     let find = &app.winamp.find;
-    // The library, recent songs and the pages come with their own lists.
-    if find.stack.len() > 1 || !find.mode.is_search() {
-        return Vec::new();
-    }
     let (catalogue, lists) = arrived(app);
-    let live = if find.mode == state::FindMode::Lists {
+    let live = if find.mode == FindMode::Lists {
         lists
     } else {
         catalogue
@@ -72,6 +69,399 @@ pub(super) fn visible_rows(app: &App) -> Vec<FindRow> {
     match &app.search.results {
         Loadable::Loaded(results) if live => find.top_search_rows(results),
         _ => find.top_search_rows(&find.held.results),
+    }
+}
+
+/// A page's rows as far as they have come.
+#[derive(Default)]
+struct Listing {
+    rows: Vec<FindRow>,
+    /// Why the rows stop short, and the page that loads them again.
+    failed: Option<(String, Page)>,
+    /// More rows are on their way.
+    loading: bool,
+    /// What asks for the next rows, once the list is scrolled near its end.
+    more: Option<Action>,
+}
+
+impl Listing {
+    fn fail(&mut self, error: &str, page: Page) {
+        self.failed = Some((error.to_string(), page));
+    }
+}
+
+/// A song's row: its artists and name, its length, and where it is from.
+fn song_row(track: &Track) -> FindRow {
+    let artists = track.artist_names();
+    let label = if artists.is_empty() {
+        track.name.clone()
+    } else {
+        format!("{artists} - {}", track.name)
+    };
+    let present = |uri: Option<&String>| uri.filter(|uri| !uri.is_empty()).cloned();
+    FindRow {
+        uri: track.uri.clone(),
+        label,
+        name: track.name.clone(),
+        duration_ms: Some(track.duration_ms),
+        kind: ItemKind::Song,
+        album_uri: present(track.album.as_ref().map(|album| &album.uri)),
+        artist_uri: present(track.artists.first().and_then(|artist| artist.uri.as_ref())),
+        context: None,
+    }
+}
+
+/// An artist, album or playlist's row.
+fn item_row(uri: &str, label: String, name: &str, kind: ItemKind) -> FindRow {
+    FindRow {
+        uri: uri.to_string(),
+        label,
+        name: name.to_string(),
+        kind,
+        ..FindRow::default()
+    }
+}
+
+/// The library: your playlists, saved albums, followed artists, then Liked
+/// Songs. Each list follows only once the one above it is whole, so rows
+/// arrive at the end and never push down the ones in view; the longest,
+/// Liked Songs, comes last so the others are a short scroll away.
+fn library(app: &App) -> Listing {
+    let library = &app.library;
+    let mut listing = Listing::default();
+    if let Loadable::Loaded(playlists) = &library.playlists {
+        listing.rows.extend(
+            playlists
+                .iter()
+                .map(|list| item_row(&list.uri, list.name.clone(), &list.name, ItemKind::Playlist)),
+        );
+    }
+
+    let albums = &library.albums;
+    listing.rows.extend(albums.items.iter().map(|saved| {
+        let album = &saved.album;
+        let artists =
+            crate::api::models::join_names(album.artists.iter().map(|artist| artist.name.as_str()));
+        let label = if artists.is_empty() {
+            album.name.clone()
+        } else {
+            format!("{artists} - {}", album.name)
+        };
+        item_row(&album.uri, label, &album.name, ItemKind::Album)
+    }));
+    if let Some(error) = &albums.error {
+        listing.fail(error, Page::Albums);
+        return listing;
+    }
+    if !albums.is_complete() {
+        listing.loading = true;
+        listing.more = albums
+            .can_load_more()
+            .then_some(Action::LoadMore(Page::Albums));
+        return listing;
+    }
+
+    let artists = &library.artists;
+    listing.rows.extend(artists.items.iter().map(|artist| {
+        item_row(
+            &artist.uri,
+            artist.name.clone(),
+            &artist.name,
+            ItemKind::Artist,
+        )
+    }));
+    if let Some(error) = &artists.error {
+        listing.fail(error, Page::Artists);
+        return listing;
+    }
+    if !artists.complete {
+        listing.loading = true;
+        listing.more = artists
+            .can_load_more()
+            .then_some(Action::LoadMore(Page::Artists));
+        return listing;
+    }
+
+    // Played as the big window's Liked Songs page plays them: in the
+    // collection once it is whole.
+    let liked = &library.liked;
+    let collection = app
+        .user
+        .as_ref()
+        .filter(|_| liked.is_complete())
+        .map(|user| format!("spotify:user:{}:collection", user.id));
+    listing.rows.extend(liked.items.iter().map(|saved| FindRow {
+        context: collection.clone(),
+        ..song_row(&saved.track)
+    }));
+    if let Some(error) = &liked.error {
+        listing.fail(error, Page::LikedSongs);
+    } else if !liked.is_complete() {
+        listing.loading = true;
+        listing.more = liked
+            .can_load_more()
+            .then_some(Action::LoadMore(Page::LikedSongs));
+    }
+    listing
+}
+
+/// A list Spotify answers whole: a radio's songs, an artist's top songs,
+/// the recently played.
+fn whole<T>(loadable: &Loadable<Vec<T>>, row: impl Fn(&T) -> FindRow, retry: Page) -> Listing {
+    let mut listing = Listing::default();
+    match loadable {
+        Loadable::Loaded(items) => listing.rows = items.iter().map(row).collect(),
+        Loadable::Failed(error) => listing.fail(error, retry),
+        Loadable::Loading | Loadable::NotLoaded => listing.loading = true,
+    }
+    listing
+}
+
+/// What `page` lists now.
+fn listing(app: &App, page: &FindPage) -> Listing {
+    match page {
+        FindPage::Top => match app.winamp.find.mode {
+            FindMode::Library => library(app),
+            FindMode::Recent => whole(
+                &app.home.recently_played,
+                |played| song_row(&played.track),
+                Page::Home,
+            ),
+            _ => Listing {
+                rows: search_rows(app),
+                ..Listing::default()
+            },
+        },
+        FindPage::Album { id, .. } => {
+            let mut listing = Listing::default();
+            let Some(album) = app.album_pages.get(id) else {
+                listing.loading = true;
+                return listing;
+            };
+            let uri = format!("spotify:album:{id}");
+            listing.rows = album
+                .tracks
+                .items
+                .iter()
+                .map(|track| FindRow {
+                    album_uri: Some(uri.clone()),
+                    ..song_row(track)
+                })
+                .collect();
+            let tracks = &album.tracks;
+            let retry = Page::Album(id.clone());
+            if let Loadable::Failed(error) = &album.album {
+                // The album itself did not come: the page failed.
+                listing.rows.clear();
+                listing.fail(error, retry);
+            } else if let Some(error) = &tracks.error {
+                listing.fail(error, retry);
+            } else {
+                listing.loading = album.album.is_loading() || tracks.loading || !tracks.loaded_once;
+                if tracks.loaded_once && tracks.can_load_more() {
+                    listing.more = Some(Action::LoadMore(retry));
+                }
+            }
+            listing
+        }
+        FindPage::Playlist { id, .. } => {
+            let mut listing = Listing::default();
+            let Some(playlist) = app.playlist_pages.get(id) else {
+                listing.loading = true;
+                return listing;
+            };
+            let items = &playlist.items;
+            listing.rows = items
+                .items
+                .iter()
+                .filter_map(|item| match item.playable()? {
+                    PlayableItem::Track(track) => Some(song_row(track)),
+                    PlayableItem::Episode(episode) => {
+                        let show = episode.show.as_ref().map(|show| show.name.as_str());
+                        Some(FindRow {
+                            uri: episode.uri.clone(),
+                            label: match show {
+                                Some(show) if !show.is_empty() => {
+                                    format!("{show} - {}", episode.name)
+                                }
+                                _ => episode.name.clone(),
+                            },
+                            name: episode.name.clone(),
+                            duration_ms: Some(episode.duration_ms),
+                            ..FindRow::default()
+                        })
+                    }
+                })
+                .collect();
+            let retry = Page::Playlist(id.clone());
+            if let Loadable::Failed(error) = &playlist.playlist {
+                listing.rows.clear();
+                listing.fail(error, retry);
+            } else if let Some(error) = &items.error {
+                listing.fail(error, retry);
+            } else {
+                listing.loading = items.loading || !items.loaded_once;
+                if items.loaded_once && items.next_offset.is_some() && items.can_load_more() {
+                    listing.more = Some(Action::LoadMore(retry));
+                }
+            }
+            listing
+        }
+        FindPage::Artist { id, albums, .. } => {
+            let retry = Page::Artist(id.clone());
+            let Some(artist) = app.artist_pages.get(id) else {
+                return Listing {
+                    loading: true,
+                    ..Listing::default()
+                };
+            };
+            if let Loadable::Failed(error) = &artist.artist {
+                let mut listing = Listing::default();
+                listing.fail(error, retry);
+                return listing;
+            }
+            if !albums {
+                return whole(&artist.top_tracks, song_row, retry);
+            }
+            let mut listing = Listing::default();
+            let Some(list) = artist.albums.get(artist.filter.groups()) else {
+                listing.loading = true;
+                return listing;
+            };
+            // One row per title, as the big window's discography shows.
+            let mut seen = std::collections::HashSet::new();
+            listing.rows = list
+                .items
+                .iter()
+                .filter(|album| seen.insert(album.name.to_lowercase()))
+                .map(|album| item_row(&album.uri, album.name.clone(), &album.name, ItemKind::Album))
+                .collect();
+            if let Some(error) = &list.error {
+                listing.fail(error, retry);
+            } else {
+                listing.loading = list.loading || !list.loaded_once;
+                if list.loaded_once && list.can_load_more() {
+                    listing.more = Some(Action::LoadMoreArtistAlbums(id.clone()));
+                }
+            }
+            listing
+        }
+        FindPage::Radio { seed, .. } => match app.radio_pages.get(seed) {
+            Some(radio) => whole(&radio.songs, song_row, Page::Radio(seed.clone())),
+            None => Listing {
+                loading: true,
+                ..Listing::default()
+            },
+        },
+    }
+}
+
+/// A page's rows: loading or failed while it has none to show.
+pub(super) fn page_rows(app: &App, page: &FindPage) -> Loadable<Vec<FindRow>> {
+    let listing = listing(app, page);
+    match listing.failed {
+        Some((error, _)) if listing.rows.is_empty() => Loadable::Failed(error),
+        _ if listing.rows.is_empty() && listing.loading => Loadable::Loading,
+        _ => Loadable::Loaded(listing.rows),
+    }
+}
+
+/// The rows the list shows: none while its page loads or has failed.
+pub(super) fn visible_rows(app: &App) -> Vec<FindRow> {
+    match page_rows(app, app.winamp.find.page()) {
+        Loadable::Loaded(rows) => rows,
+        _ => Vec::new(),
+    }
+}
+
+/// Asks for what the page shown lists, once, when nothing of it is held:
+/// as the big window's pages do on opening.
+fn fetch(app: &mut App) {
+    let page = app.winamp.find.page().clone();
+    match page {
+        FindPage::Top => match app.winamp.find.mode {
+            FindMode::Library => {
+                let liked = &app.library.liked;
+                if !liked.loaded_once && !liked.loading && liked.error.is_none() {
+                    app.ensure_loaded(Page::LikedSongs);
+                }
+                // Each loads only its first page, once.
+                app.ensure_loaded(Page::Albums);
+                app.ensure_loaded(Page::Artists);
+            }
+            FindMode::Recent => {
+                if matches!(app.home.recently_played, Loadable::NotLoaded) {
+                    app.ensure_loaded(Page::Home);
+                }
+            }
+            _ => {}
+        },
+        FindPage::Album { id, .. } => {
+            if !app.album_pages.contains_key(&id) {
+                app.ensure_loaded(Page::Album(id));
+            }
+        }
+        FindPage::Playlist { id, .. } => {
+            if !app.playlist_pages.contains_key(&id) {
+                app.ensure_loaded(Page::Playlist(id));
+            }
+        }
+        FindPage::Artist { id, .. } => {
+            let held = app
+                .artist_pages
+                .get(&id)
+                .is_some_and(|page| page.albums.contains_key(page.filter.groups()));
+            if !held {
+                app.ensure_loaded(Page::Artist(id));
+            }
+        }
+        FindPage::Radio { seed, .. } => {
+            if !app.radio_pages.contains_key(&seed) {
+                app.ensure_loaded(Page::Radio(seed));
+            }
+        }
+    }
+}
+
+/// Whether the list is scrolled near enough its end to ask for more.
+fn near_end(len: usize, scroll: usize, in_view: usize) -> bool {
+    scroll + in_view + in_view / 2 >= len
+}
+
+/// The list's lines: the rows, numbered as the playlist's, then the error
+/// a page's load ended in, in the list's "current" colour.
+fn lines(app: &App, listing: &Listing) -> Vec<ListRow<'static>> {
+    let playing = app.now_playing().map(|now| now.uri);
+    let selected = app.winamp.find.selected;
+    let mut lines: Vec<ListRow> = listing
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| ListRow {
+            label: Cow::Owned(format!("{}. {}", index + 1, row.label)),
+            right: row.duration_ms.map(util::format_duration_ms),
+            current: playing.as_deref() == Some(row.uri.as_str()),
+            selected: selected == Some(index),
+        })
+        .collect();
+    if let Some((error, _)) = &listing.failed {
+        let error = crate::ui::widgets::sanitize_error_message(error, app.locale);
+        lines.push(ListRow {
+            label: Cow::Owned(format!("{error} - {}", gettext(app.locale, "Retry"))),
+            right: None,
+            current: true,
+            selected: false,
+        });
+    }
+    lines
+}
+
+/// A click on a line: a row is picked; the error line loads the page again.
+fn pick(app: &mut App, listing: &Listing, index: usize) {
+    if index < listing.rows.len() {
+        app.winamp.find.selected = Some(index);
+    } else if let Some((_, page)) = &listing.failed {
+        app.actions.push(Action::Reload(page.clone()));
     }
 }
 
@@ -95,15 +485,18 @@ fn hold_answer(app: &mut App) {
     }
 }
 
-/// Double-click, Enter or PLAY on a row. A song plays on its own and
-/// Spotify's autoplay carries on after it; the other kinds open inside
-/// FIND once it has pages.
-fn choose(app: &mut App, row: &FindRow) {
-    if row.kind == ItemKind::Song {
-        app.actions.push(Action::PlayUris {
-            uris: vec![row.uri.clone()],
-            index: 0,
-        });
+/// Double-click, Enter or PLAY on the `index`th row: a song plays, and
+/// an artist, album or playlist opens inside FIND.
+fn choose(app: &mut App, rows: &[FindRow], index: usize) {
+    let Some(row) = rows.get(index) else {
+        return;
+    };
+    match app.winamp.find.choose(row, rows, index) {
+        Choice::Play(action) => app.actions.push(action),
+        Choice::Open(page) => {
+            app.winamp.find.open(page);
+            app.winamp.find_scroll = 0;
+        }
     }
 }
 
@@ -115,12 +508,6 @@ fn queue(app: &mut App, row: &FindRow) {
             label: row.label.clone(),
         });
     }
-}
-
-/// The selected row, if it is still on the list.
-fn selected_row(app: &App) -> Option<FindRow> {
-    let index = app.winamp.find.selected?;
-    visible_rows(app).into_iter().nth(index)
 }
 
 /// Whether FIND is drawn open, so it can hold the keyboard.
@@ -189,6 +576,7 @@ fn key(app: &mut App, event: Event, now: Instant) {
         Event::Key {
             key,
             pressed: true,
+            repeat,
             modifiers,
             ..
         } => match key {
@@ -197,7 +585,13 @@ fn key(app: &mut App, event: Event, now: Instant) {
                 app.actions.extend(actions);
                 app.winamp.find_scroll = 0;
             }
-            Key::Backspace if app.winamp.find.query.is_empty() => back(app),
+            // Only a fresh press: holding Backspace to empty the box stops
+            // once it is empty rather than going on through the pages.
+            Key::Backspace if app.winamp.find.query.is_empty() => {
+                if !repeat {
+                    back(app);
+                }
+            }
             Key::Backspace => {
                 let mut query = app.winamp.find.query.clone();
                 query.pop();
@@ -208,8 +602,9 @@ fn key(app: &mut App, event: Event, now: Instant) {
                 if find.pending.is_some() || find.selected.is_none() {
                     let actions = find.submit();
                     app.actions.extend(actions);
-                } else if let Some(row) = selected_row(app) {
-                    choose(app, &row);
+                } else if let Some(index) = find.selected {
+                    let rows = visible_rows(app);
+                    choose(app, &rows, index);
                 }
             }
             Key::Escape => app.winamp.find.focused = false,
@@ -225,10 +620,14 @@ fn key(app: &mut App, event: Event, now: Instant) {
     }
 }
 
-/// BACK, or Backspace in an empty box: out of the page FIND is in.
+/// BACK, or Backspace in an empty box: out of the page FIND is in, to
+/// the row it was opened from.
 fn back(app: &mut App) {
     if app.winamp.find.back() {
         app.winamp.find_scroll = 0;
+        if let Some(index) = app.winamp.find.selected {
+            reveal(app, index);
+        }
     }
 }
 
@@ -259,6 +658,11 @@ fn step(app: &mut App, delta: i64) {
         Some(index) => (index as i64 + delta).clamp(0, last),
     } as usize;
     app.winamp.find.selected = Some(index);
+    reveal(app, index);
+}
+
+/// Scrolls the list so the `index`th row is in view.
+fn reveal(app: &mut App, index: usize) {
     let in_view = rows_in_view(app).max(1);
     let scroll = &mut app.winamp.find_scroll;
     if index < *scroll {
@@ -293,22 +697,12 @@ pub(super) fn show(app: &mut App, view: &mut View, focused: bool) {
     let (bar, modes, area) = split(section::list_area(height));
     take_focus(app, view, bar);
     hold_answer(app);
+    fetch(app);
     input_bar(app, view, bar, focused);
     mode_row(app, view, modes);
 
-    let rows = visible_rows(app);
-    let playing = app.now_playing().map(|now| now.uri);
-    let selected = app.winamp.find.selected;
-    let lines: Vec<ListRow> = rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| ListRow {
-            label: Cow::Owned(format!("{}. {}", index + 1, row.label)),
-            right: row.duration_ms.map(util::format_duration_ms),
-            current: playing.as_deref() == Some(row.uri.as_str()),
-            selected: selected == Some(index),
-        })
-        .collect();
+    let listing = listing(app, app.winamp.find.page());
+    let lines = lines(app, &listing);
     let winamp = &mut app.winamp;
     let response = section::list(
         view,
@@ -320,21 +714,28 @@ pub(super) fn show(app: &mut App, view: &mut View, focused: bool) {
         WinampSection::Find,
     );
     if let Some(index) = response.clicked.or(response.secondary) {
-        winamp.find.selected = Some(index);
+        pick(app, &listing, index);
     }
-    if let Some(row) = response.double_clicked.and_then(|index| rows.get(index)) {
-        choose(app, row);
+    let rows = &listing.rows;
+    if let Some(index) = response.double_clicked {
+        choose(app, rows, index);
+    }
+    // Library lists have no cap: their next page comes as the end nears.
+    if let Some(more) = listing.more.clone()
+        && near_end(rows.len(), app.winamp.find_scroll, rows_in_view(app))
+    {
+        app.actions.push(more);
     }
 
-    let chosen = app.winamp.find.selected.and_then(|index| rows.get(index));
+    let chosen = app.winamp.find.selected.filter(|index| *index < rows.len());
     match section::bottom_buttons(view, height, &BUTTONS, "find") {
         Some(PLAY) => {
-            if let Some(row) = chosen {
-                choose(app, row);
+            if let Some(index) = chosen {
+                choose(app, rows, index);
             }
         }
         Some(QUEUE) => {
-            if let Some(row) = chosen {
+            if let Some(row) = chosen.and_then(|index| rows.get(index)) {
                 queue(app, row);
             }
         }
@@ -454,13 +855,14 @@ fn input_bar(app: &mut App, view: &mut View, bar: Area, window_focused: bool) {
     }
 }
 
-/// The modes for what the box holds, the one shown picked out in the
-/// playlist's selection colours.
+/// The modes for what the box holds, or an artist's SONGS and ALBUMS on
+/// their page, the one shown picked out in the playlist's selection
+/// colours.
 fn mode_row(app: &mut App, view: &mut View, row: Area) {
     let style = view.skin.playlist.clone();
     let gap = 8;
     let mut x = row.x + 3;
-    let current = app.winamp.find.mode;
+    let current = app.winamp.find.shown_mode();
     for &mode in app.winamp.find.modes() {
         let label = mode.label();
         let width = app.winamp.playlist_text.width(label).ceil() as u32;
@@ -490,8 +892,15 @@ fn mode_row(app: &mut App, view: &mut View, row: Area) {
             .interact(cell, &format!("find-mode-{label}"), Sense::click())
             .clicked()
         {
-            app.winamp.find.set_mode(mode);
-            app.winamp.find_scroll = 0;
+            // Inside an album, playlist or radio, every mode leads out.
+            let leaves = !matches!(
+                app.winamp.find.page(),
+                FindPage::Top | FindPage::Artist { .. }
+            );
+            if mode != current || leaves {
+                app.winamp.find.pick_mode(mode);
+                app.winamp.find_scroll = 0;
+            }
         }
         x += width + gap;
     }
@@ -575,7 +984,7 @@ mod tests {
         app.winamp.find.set_query("Bonobo".into());
         let rows = visible_rows(&app);
         app.actions.clear();
-        choose(&mut app, &rows[1]);
+        choose(&mut app, &rows, 1);
         assert!(matches!(
             app.actions.as_slice(),
             [Action::PlayUris { uris, index: 0 }] if uris == &[rows[1].uri.clone()]
@@ -832,6 +1241,206 @@ mod tests {
         let height = app.settings.section_height(WinampSection::Find);
         click(&mut app, &ctx, 30.0, (height - 19) as f32);
         assert!(!app.winamp.find.focused);
+        app.backend.shutdown();
+    }
+    fn kinds(rows: &[FindRow]) -> Vec<ItemKind> {
+        let mut kinds: Vec<ItemKind> = rows.iter().map(|row| row.kind).collect();
+        kinds.dedup();
+        kinds
+    }
+
+    #[test]
+    fn library_lists_playlists_albums_artists_then_liked_songs() {
+        let mut app = searched_app();
+        let rows = visible_rows(&app);
+        assert_eq!(
+            kinds(&rows),
+            [
+                ItemKind::Playlist,
+                ItemKind::Album,
+                ItemKind::Artist,
+                ItemKind::Song
+            ]
+        );
+        let liked = app.library.liked.items.len();
+        assert_eq!(
+            rows.iter().filter(|r| r.kind == ItemKind::Song).count(),
+            liked
+        );
+        // Whole, the songs play in the collection, as the big window does.
+        let song = rows.iter().find(|r| r.kind == ItemKind::Song).unwrap();
+        assert_eq!(
+            song.context.as_deref(),
+            Some("spotify:user:demo:collection")
+        );
+        // No cap: a long library lists every row.
+        assert!(rows.len() > state::RESULT_LIMIT);
+
+        // A list still loading ends the rows there, and its next page is
+        // what scrolling near the end asks for.
+        app.library.albums.next_offset = Some(8);
+        let listing = listing(&app, &FindPage::Top);
+        assert_eq!(kinds(&listing.rows), [ItemKind::Playlist, ItemKind::Album]);
+        assert!(matches!(listing.more, Some(Action::LoadMore(Page::Albums))));
+        let len = listing.rows.len();
+        assert!(!near_end(len, 0, 5));
+        assert!(near_end(len, len - 5, 5));
+        // Already on its way: not asked for twice.
+        app.library.albums.loading = true;
+        assert!(listing_more(&app).is_none());
+        app.backend.shutdown();
+    }
+
+    fn listing_more(app: &App) -> Option<Action> {
+        listing(app, &FindPage::Top).more
+    }
+
+    #[test]
+    fn recent_lists_the_songs_played_lately() {
+        let mut app = searched_app();
+        app.winamp.find.set_mode(state::FindMode::Recent);
+        let rows = visible_rows(&app);
+        let Loadable::Loaded(history) = &app.home.recently_played else {
+            unreachable!()
+        };
+        assert_eq!(rows.len(), history.len());
+        assert_eq!(rows[0].uri, history[0].track.uri);
+        assert!(rows.iter().all(|r| r.kind == ItemKind::Song));
+        app.home.recently_played = Loadable::Loading;
+        assert!(matches!(page_rows(&app, &FindPage::Top), Loadable::Loading));
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn a_page_that_failed_to_load_shows_one_line_and_keeps_back() {
+        let mut app = searched_app();
+        app.album_pages.get_mut("alb0").unwrap().album = Loadable::Failed("Gone".into());
+        app.winamp.find.open(FindPage::Album {
+            id: "alb0".into(),
+            name: "Album".into(),
+        });
+        let page = app.winamp.find.page().clone();
+        assert!(matches!(page_rows(&app, &page), Loadable::Failed(_)));
+        let listing = listing(&app, &page);
+        let lines = lines(&app, &listing);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].current, "in the list's current colour");
+        app.actions.clear();
+        pick(&mut app, &listing, 0);
+        assert!(matches!(
+            app.actions.as_slice(),
+            [Action::Reload(Page::Album(id))] if id == "alb0"
+        ));
+        assert_eq!(app.winamp.find.selected, None, "the line is not a row");
+
+        back(&mut app);
+        assert_eq!(app.winamp.find.page(), &FindPage::Top);
+        assert!(matches!(
+            page_rows(&app, &FindPage::Top),
+            Loadable::Loaded(rows) if kinds(&rows).len() == 4
+        ));
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn open_an_artist_then_an_album_and_back_twice() {
+        let mut app = searched_app();
+        let rows = visible_rows(&app);
+        let artist = rows
+            .iter()
+            .position(|r| r.uri == "spotify:artist:art0")
+            .unwrap();
+        app.winamp.find.selected = Some(artist);
+        app.winamp.find_scroll = 3;
+        choose(&mut app, &rows, artist);
+        assert!(matches!(
+            app.winamp.find.page(),
+            FindPage::Artist { id, albums: false, .. } if id == "art0"
+        ));
+        assert_eq!(app.winamp.find_scroll, 0);
+        let songs = visible_rows(&app);
+        assert_eq!(songs.len(), 10);
+        app.actions.clear();
+        choose(&mut app, &songs, 3);
+        assert!(matches!(
+            app.actions.as_slice(),
+            [Action::PlayUris { uris, index: 3 }] if uris.len() == 10
+        ));
+
+        app.winamp.find.pick_mode(state::FindMode::Albums);
+        let albums = visible_rows(&app);
+        assert!(!albums.is_empty());
+        assert!(albums.iter().all(|r| r.kind == ItemKind::Album));
+        let first = albums
+            .iter()
+            .position(|r| r.uri == "spotify:album:alb0")
+            .unwrap();
+        choose(&mut app, &albums, first);
+        assert!(app.winamp.find.title().starts_with("FIND - "));
+        let tracks = visible_rows(&app);
+        assert_eq!(tracks.len(), 12);
+        app.actions.clear();
+        choose(&mut app, &tracks, 2);
+        assert!(matches!(
+            app.actions.as_slice(),
+            [Action::PlayContext { uri, offset_uri: Some(o), .. }]
+                if uri == "spotify:album:alb0" && *o == tracks[2].uri
+        ));
+
+        back(&mut app);
+        assert!(matches!(
+            app.winamp.find.page(),
+            FindPage::Artist { albums: true, .. }
+        ));
+        assert_eq!(app.winamp.find.selected, None);
+        back(&mut app);
+        assert_eq!(app.winamp.find.page(), &FindPage::Top);
+        assert_eq!(app.winamp.find.selected, Some(artist), "back to the row");
+        app.backend.shutdown();
+    }
+
+    fn release(key: Key) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Holding Backspace empties the box and stops there: only a fresh
+    /// press goes back a page.
+    #[test]
+    fn a_held_backspace_never_goes_back() {
+        let ctx = egui::Context::default();
+        let mut app = searched_app();
+        app.settings.find_open = true;
+        app.winamp.find.set_query(String::new());
+        app.winamp.find.open(FindPage::Artist {
+            id: "art0".into(),
+            name: "R".into(),
+            albums: true,
+        });
+        app.winamp.find.open(FindPage::Album {
+            id: "alb0".into(),
+            name: "A".into(),
+        });
+        app.winamp.find.focused = true;
+        let backspace = || press(Key::Backspace, egui::Modifiers::NONE);
+        // Held down: egui marks every press after the first as a repeat.
+        frame(&mut app, &ctx, vec![backspace()]);
+        assert!(matches!(app.winamp.find.page(), FindPage::Artist { .. }));
+        frame(&mut app, &ctx, vec![backspace()]);
+        frame(&mut app, &ctx, vec![backspace()]);
+        assert!(
+            matches!(app.winamp.find.page(), FindPage::Artist { .. }),
+            "the repeats stay"
+        );
+        // Let go, then a fresh press.
+        frame(&mut app, &ctx, vec![release(Key::Backspace)]);
+        frame(&mut app, &ctx, vec![backspace()]);
+        assert_eq!(app.winamp.find.page(), &FindPage::Top);
         app.backend.shutdown();
     }
 }

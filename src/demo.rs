@@ -1460,6 +1460,50 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.settings.find_open = true;
                 let _ = app.winamp.find.set_query(String::new());
             }
+            // FIND browsing, the box empty: RECENT; an album; an artist's
+            // top songs, their albums; and an album that failed to load.
+            "find-recent" | "find-album" | "find-artist" | "find-artist-albums" | "find-failed" => {
+                use crate::ui::winamp::find::state::{FindMode, FindPage};
+                app.settings.find_open = true;
+                app.settings.find_height = 203;
+                let album = FindPage::Album {
+                    id: "alb0".into(),
+                    name: app.album_pages["alb0"]
+                        .album
+                        .get()
+                        .map(|album| album.name.clone())
+                        .unwrap_or_default(),
+                };
+                let artist = |albums| FindPage::Artist {
+                    id: "art0".into(),
+                    name: app.artist_pages["art0"]
+                        .artist
+                        .get()
+                        .map(|artist| artist.name.clone())
+                        .unwrap_or_default(),
+                    albums,
+                };
+                let page = match surface {
+                    "find-recent" => None,
+                    "find-artist" => Some(artist(false)),
+                    "find-artist-albums" => Some(artist(true)),
+                    "find-failed" => {
+                        app.album_pages.get_mut("alb0").unwrap().album =
+                            Loadable::Failed("Spotify did not answer".into());
+                        Some(album)
+                    }
+                    _ => Some(album),
+                };
+                let find = &mut app.winamp.find;
+                let _ = find.set_query(String::new());
+                if surface == "find-recent" {
+                    find.set_mode(FindMode::Recent);
+                }
+                if let Some(page) = page {
+                    find.open(page);
+                }
+                find.selected = Some(1);
+            }
             // One screen pixel per skin pixel; after `winamp`, which asks
             // for two.
             "winamp-1x" => app.settings.skin_scale = Some(1),
