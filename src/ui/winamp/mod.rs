@@ -16,7 +16,7 @@ use egui::{
 
 use crate::app::{App, NowPlaying};
 use crate::i18n::{Locale, gettext, pgettext};
-use crate::model::{Action, Page};
+use crate::model::{Action, Page, WinampSection};
 use crate::player::RepeatMode;
 use crate::settings::VisMode;
 use crate::skin::layout::{self, Area};
@@ -56,6 +56,15 @@ fn stack_height(settings: &crate::settings::Settings) -> u32 {
                 .playlist_height
                 .clamp(layout::PLAYLIST_MIN_HEIGHT, layout::PLAYLIST_MAX_HEIGHT)
         };
+    }
+    for section in [
+        WinampSection::Find,
+        WinampSection::Lyrics,
+        WinampSection::Vis,
+    ] {
+        if settings.section_open(section) {
+            height += settings.section_height(section);
+        }
     }
     height
 }
@@ -1562,6 +1571,36 @@ fn shuffle_repeat(app: &mut App, view: &mut View, now: Option<&NowPlaying>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_open_section_adds_its_height_in_order() {
+        let mut s = crate::settings::Settings {
+            find_open: true,
+            lyrics_open: true,
+            vis_open: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            stack_height(&s),
+            layout::WINDOW_HEIGHT + 174 + 116 + layout::VIS_HEIGHT
+        );
+        s.lyrics_shaded = true;
+        assert_eq!(
+            stack_height(&s),
+            layout::WINDOW_HEIGHT + 174 + layout::SECTION_SHADE_HEIGHT + layout::VIS_HEIGHT
+        );
+        s.eq_open = true;
+        s.playlist_open = true;
+        assert_eq!(
+            stack_height(&s),
+            layout::WINDOW_HEIGHT
+                + layout::EQ_HEIGHT
+                + s.playlist_height
+                + 174
+                + layout::SECTION_SHADE_HEIGHT
+                + layout::VIS_HEIGHT
+        );
+    }
 
     fn now(title: &str, subtitle: &str, duration_ms: u32) -> NowPlaying {
         NowPlaying {

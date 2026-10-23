@@ -1021,6 +1021,14 @@ pub struct Toast {
     pub created: Instant,
 }
 
+/// A section stacked under the mini player's playlist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WinampSection {
+    Find,
+    Lyrics,
+    Vis,
+}
+
 /// Actions emitted while drawing and applied afterward to avoid borrow conflicts.
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -1330,6 +1338,12 @@ pub enum Action {
     SetPlaylistHeight(u32),
     /// Open or close the equalizer window under the mini player.
     ToggleWinampEq,
+    /// Open or close a FIND, LYRICS or VIS section under the mini player.
+    ToggleWinampSection(WinampSection),
+    /// Roll a section up to its title bar, or down again.
+    ToggleWinampSectionShade(WinampSection),
+    /// A section's height, in skin pixels. VIS is never resized.
+    SetWinampSectionHeight(WinampSection, u32),
     /// Switch the equalizer's effect on the sound on or off.
     ToggleEq,
     SetEqBand(usize, f32),

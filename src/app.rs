@@ -11768,6 +11768,42 @@ impl App {
                 );
                 self.settings_dirty = true;
             }
+            Action::ToggleWinampSection(section) => {
+                let open = match section {
+                    WinampSection::Find => &mut self.settings.find_open,
+                    WinampSection::Lyrics => &mut self.settings.lyrics_open,
+                    WinampSection::Vis => &mut self.settings.vis_open,
+                };
+                *open = !*open;
+                self.settings_dirty = true;
+            }
+            Action::ToggleWinampSectionShade(section) => {
+                let shaded = match section {
+                    WinampSection::Find => &mut self.settings.find_shaded,
+                    WinampSection::Lyrics => &mut self.settings.lyrics_shaded,
+                    WinampSection::Vis => &mut self.settings.vis_shaded,
+                };
+                *shaded = !*shaded;
+                self.settings_dirty = true;
+            }
+            Action::SetWinampSectionHeight(section, height) => {
+                let height = height.clamp(
+                    crate::skin::layout::SECTION_MIN_HEIGHT,
+                    crate::skin::layout::SECTION_MAX_HEIGHT,
+                );
+                match section {
+                    WinampSection::Find => {
+                        self.settings.find_height = height;
+                        self.settings_dirty = true;
+                    }
+                    WinampSection::Lyrics => {
+                        self.settings.lyrics_height = height;
+                        self.settings_dirty = true;
+                    }
+                    // VIS has one fixed height.
+                    WinampSection::Vis => {}
+                }
+            }
             Action::ToggleWinampEq => {
                 self.settings.eq_open = !self.settings.eq_open;
                 self.settings_dirty = true;
@@ -19825,6 +19861,30 @@ mod tests {
         app.check_tray_wait(started + TRAY_WAIT, false);
         assert!(!app.wants_show);
         app.backend.shutdown();
+    }
+
+    #[test]
+    fn section_actions_toggle_shade_and_clamp_height() {
+        use crate::skin::layout;
+        let ctx = egui::Context::default();
+        let mut app = test_app("winamp-sections");
+        app.apply(Action::ToggleWinampSection(WinampSection::Find), &ctx);
+        assert!(app.settings.find_open && app.settings_dirty);
+        app.apply(
+            Action::ToggleWinampSectionShade(WinampSection::Lyrics),
+            &ctx,
+        );
+        assert!(app.settings.lyrics_shaded);
+        app.apply(Action::SetWinampSectionHeight(WinampSection::Find, 5), &ctx);
+        assert_eq!(app.settings.find_height, layout::SECTION_MIN_HEIGHT);
+        app.apply(
+            Action::SetWinampSectionHeight(WinampSection::Vis, 500),
+            &ctx,
+        );
+        assert_eq!(
+            app.settings.section_height(WinampSection::Vis),
+            layout::VIS_HEIGHT
+        );
     }
 
     fn test_app(name: &str) -> App {

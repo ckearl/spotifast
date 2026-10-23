@@ -99,6 +99,14 @@ pub const PLAYLIST_MIN_HEIGHT: u32 = 116;
 pub const PLAYLIST_SHADE_HEIGHT: u32 = 14;
 pub const PLAYLIST_MAX_HEIGHT: u32 = 116 + 29 * 20;
 pub const PLAYLIST_RESIZE_STEP: u32 = 29;
+/// FIND and LYRICS share the playlist's resize range and step.
+pub const SECTION_MIN_HEIGHT: u32 = 116;
+pub const SECTION_MAX_HEIGHT: u32 = PLAYLIST_MAX_HEIGHT;
+pub const SECTION_RESIZE_STEP: u32 = 29;
+/// A section rolled up to its title bar.
+pub const SECTION_SHADE_HEIGHT: u32 = 14;
+/// VIS has one fixed height.
+pub const VIS_HEIGHT: u32 = 58;
 /// The title bar's buttons, from the playlist's top left.
 pub const PLAYLIST_CLOSE: Area = Area::new(264, 3, 9, 9);
 pub const PLAYLIST_SHADE: Area = Area::new(254, 3, 9, 9);

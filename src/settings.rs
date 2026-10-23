@@ -403,6 +403,22 @@ pub struct Settings {
     pub playlist_height: u32,
     /// The equalizer window is open under the mini player.
     pub eq_open: bool,
+    /// The FIND section is open under the mini player.
+    pub find_open: bool,
+    /// The FIND section is rolled up to its title bar.
+    pub find_shaded: bool,
+    /// How tall the FIND section is, in skin pixels.
+    pub find_height: u32,
+    /// The LYRICS section is open under the mini player.
+    pub lyrics_open: bool,
+    /// The LYRICS section is rolled up to its title bar.
+    pub lyrics_shaded: bool,
+    /// How tall the LYRICS section is, in skin pixels.
+    pub lyrics_height: u32,
+    /// The VIS section is open under the mini player.
+    pub vis_open: bool,
+    /// The VIS section is rolled up to its title bar.
+    pub vis_shaded: bool,
     /// The equalizer shapes local playback.
     pub eq_on: bool,
     /// The preamp, in decibels, never above zero.
@@ -543,6 +559,14 @@ impl Default for Settings {
             playlist_open: false,
             playlist_height: 174,
             eq_open: false,
+            find_open: false,
+            find_shaded: false,
+            find_height: 174,
+            lyrics_open: false,
+            lyrics_shaded: false,
+            lyrics_height: 116,
+            vis_open: false,
+            vis_shaded: false,
             eq_on: false,
             eq_preamp_db: 0.0,
             eq_bands_db: [0.0; 10],
@@ -575,6 +599,42 @@ fn default_buffer_ms() -> u32 {
 }
 
 impl Settings {
+    /// Whether a section is open under the mini player.
+    pub fn section_open(&self, section: crate::model::WinampSection) -> bool {
+        use crate::model::WinampSection::*;
+        match section {
+            Find => self.find_open,
+            Lyrics => self.lyrics_open,
+            Vis => self.vis_open,
+        }
+    }
+
+    /// Whether a section is rolled up to its title bar.
+    pub fn section_shaded(&self, section: crate::model::WinampSection) -> bool {
+        use crate::model::WinampSection::*;
+        match section {
+            Find => self.find_shaded,
+            Lyrics => self.lyrics_shaded,
+            Vis => self.vis_shaded,
+        }
+    }
+
+    /// A section's height in skin pixels: clamped, or the shade height
+    /// when rolled up. VIS is always its fixed height.
+    pub fn section_height(&self, section: crate::model::WinampSection) -> u32 {
+        use crate::model::WinampSection::*;
+        use crate::skin::layout;
+        if self.section_shaded(section) {
+            return layout::SECTION_SHADE_HEIGHT;
+        }
+        let wanted = match section {
+            Find => self.find_height,
+            Lyrics => self.lyrics_height,
+            Vis => return layout::VIS_HEIGHT,
+        };
+        wanted.clamp(layout::SECTION_MIN_HEIGHT, layout::SECTION_MAX_HEIGHT)
+    }
+
     /// The local files folder, when one is set.
     pub fn local_files_folder(&self) -> Option<std::path::PathBuf> {
         self.local_files_folder
@@ -1341,6 +1401,13 @@ mod tests {
         let again: Settings =
             serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert_eq!(again.eq_user_presets, settings.eq_user_presets);
+    }
+
+    #[test]
+    fn settings_from_before_the_sections_still_load() {
+        let s: Settings = serde_json::from_str(r#"{"playlist_open":true}"#).unwrap();
+        assert!(s.playlist_open && !s.find_open && !s.lyrics_open && !s.vis_open);
+        assert_eq!(s.find_height, 174);
     }
 
     #[test]
