@@ -97,6 +97,9 @@ pub struct WinampState {
     /// The sound on its way out, for the visualiser.
     pub tap: Arc<AudioTap>,
     pub analyser: Analyser,
+    /// VIS's wide analyser, apart from the player bar's, which may show
+    /// at the same time and steps on its own clock.
+    pub wide: crate::vis::WideAnalyser,
     /// The equalizer as the player's thread reads it.
     pub eq: crate::eq::SharedEq,
     /// The playlist window: its first visible row, the row clicked, the
@@ -172,6 +175,7 @@ impl WinampState {
             },
             tap,
             analyser: Analyser::default(),
+            wide: crate::vis::WideAnalyser::default(),
             eq,
             playlist_scroll: 0,
             playlist_selection: std::collections::HashSet::new(),

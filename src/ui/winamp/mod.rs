@@ -36,6 +36,7 @@ mod lyrics;
 mod pixel_text;
 mod playlist;
 mod section;
+mod vis_section;
 
 pub use pixel_text::PixelText;
 
@@ -388,7 +389,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         textures: &textures,
         mask,
     };
-    let vis_moving = if shaded {
+    let mut vis_moving = if shaded {
         shade_bar(app, &mut view, &ctx, focused, now.as_ref());
         false
     } else {
@@ -446,7 +447,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             textures: &textures,
             mask: None,
         };
-        show_section(app, &mut below, section, now.as_ref(), focused);
+        vis_moving |= show_section(app, &mut below, section, now.as_ref(), focused);
         below_y += app.settings.section_height(section);
     }
 
@@ -473,21 +474,25 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
 }
 
-/// One section under the playlist, in its frame. FIND and LYRICS bring
-/// their bodies with them; VIS's is still empty.
+/// One section under the playlist, in its frame. Returns whether VIS's
+/// bars are still moving.
 fn show_section(
     app: &mut App,
     view: &mut View,
     section: WinampSection,
     now: Option<&NowPlaying>,
     focused: bool,
-) {
+) -> bool {
     match section {
-        WinampSection::Find => find::show(app, view, focused),
-        WinampSection::Lyrics => lyrics::show(app, view, now, focused),
-        WinampSection::Vis => {
-            section::frame(app, view, section, "VIS", focused);
+        WinampSection::Find => {
+            find::show(app, view, focused);
+            false
         }
+        WinampSection::Lyrics => {
+            lyrics::show(app, view, now, focused);
+            false
+        }
+        WinampSection::Vis => vis_section::show(app, view, now, focused),
     }
 }
 
@@ -1786,7 +1791,7 @@ mod tests {
         );
     }
 
-    fn now(title: &str, subtitle: &str, duration_ms: u32) -> NowPlaying {
+    pub(super) fn now(title: &str, subtitle: &str, duration_ms: u32) -> NowPlaying {
         NowPlaying {
             local: true,
             device_name: None,

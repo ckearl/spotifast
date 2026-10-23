@@ -1438,6 +1438,15 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.settings.find_height = 174;
                 app.settings.lyrics_height = 145;
             }
+            // VIS open with the demo's chord playing here; and with the
+            // demo's song on the remote device it starts on.
+            "vis" => {
+                app.settings.vis_open = true;
+                play_here(app);
+                app.local.playback = crate::player::Playback::Playing;
+                app.winamp.tap.push(&demo_sound(), 1.0);
+            }
+            "vis-elsewhere" => app.settings.vis_open = true,
             // LYRICS open on the song's synced words, following; with no
             // words found; and with the fetch failed.
             "lyrics-section" | "lyrics-section-empty" | "lyrics-section-error" => {
