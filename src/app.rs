@@ -2879,6 +2879,20 @@ impl App {
             self.load_playlists();
         }
         let page = self.page().clone();
+        // The mini player's FIND has pages of its own, which the big
+        // window's may not be.
+        let find_page = (self.settings.winamp_window && self.settings.find_open)
+            .then(|| self.winamp.find.page().as_page())
+            .flatten()
+            .filter(|find_page| *find_page != page);
+        self.recover_page(page);
+        if let Some(find_page) = find_page {
+            self.recover_page(find_page);
+        }
+    }
+
+    /// Asks again for what `page` lacks now the network is back.
+    fn recover_page(&mut self, page: Page) {
         match page {
             Page::Home => {
                 // A failed answer may have left cached shelves showing.
@@ -3640,10 +3654,14 @@ impl App {
         {
             self.refresh_queue(true);
         }
-        if self.show_lyrics_panel || self.lyrics_fullscreen.is_some() || self.settings.lyrics_open {
+        if self.show_lyrics_panel
+            || self.lyrics_fullscreen.is_some()
+            || (self.settings.winamp_window && self.settings.lyrics_open)
+        {
             // Fullscreen shows lyrics without the panel flag when the
-            // queue column is open, and the mini player's LYRICS section
-            // has its own; a track change must refresh them.
+            // queue column is open, and the mini player's LYRICS section,
+            // while the mini player shows, has its own; a track change
+            // must refresh them.
             self.request_lyrics();
         }
     }
@@ -11209,6 +11227,12 @@ impl App {
                     });
                 }
             }
+            // Dialogs draw only in the big window: the mini player shows
+            // its own list of keys instead of leaving this one to pop up
+            // there later (R20). The macOS menu's item asks this way.
+            Action::ShowDialog(Dialog::Shortcuts) if self.settings.winamp_window => {
+                self.winamp.open_shortcuts = true;
+            }
             Action::ShowDialog(mut dialog) => {
                 if let Dialog::EditPlaylist { id, cover, .. } = &mut dialog
                     && let Some(request) = self.cover_uploads.get(id)
@@ -11868,6 +11892,11 @@ impl App {
                 self.settings.winamp_window = !self.settings.winamp_window;
                 self.settings_dirty = true;
                 self.switch_intent = true;
+                // LYRICS was not kept up while the big window showed: the
+                // section asks for the playing song's words, not the last.
+                if self.settings.winamp_window && self.settings.lyrics_open {
+                    self.request_lyrics();
+                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Action::SetSkin(name) => {
@@ -14580,6 +14609,7 @@ mod tests {
         let mut app = test_app("lyrics-section");
         crate::demo::populate(&mut app);
         app.offline = false;
+        app.settings.winamp_window = true;
         app.settings.lyrics_open = true;
         app.show_lyrics_panel = false;
         app.lyrics_fullscreen = None;
@@ -14592,6 +14622,58 @@ mod tests {
         assert_eq!(
             app.lyrics_uri.as_deref(),
             Some("spotify:track:lyrics-section-new")
+        );
+        assert!(matches!(app.lyrics, Loadable::Loading));
+        app.backend.shutdown();
+    }
+
+    /// LYRICS stays open in the settings while the big window shows; a
+    /// song changing there asks for no words nothing shows.
+    #[test]
+    fn the_big_window_never_fetches_the_mini_players_lyrics() {
+        let mut app = test_app("lyrics-section-hidden");
+        crate::demo::populate(&mut app);
+        app.offline = false;
+        app.settings.winamp_window = false;
+        app.settings.lyrics_open = true;
+        app.show_lyrics_panel = false;
+        app.lyrics_fullscreen = None;
+        let before = app.lyrics_uri.clone();
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:lyrics-section-hidden".into(),
+            ..Default::default()
+        });
+        app.local.playback = Playback::Playing;
+        app.on_now_playing_changed();
+        assert_eq!(app.lyrics_uri, before, "nothing shows the section");
+        app.backend.shutdown();
+    }
+
+    /// Back in the mini player with LYRICS open, the section asks for the
+    /// playing song's words, never showing the last song's.
+    #[test]
+    fn switching_to_the_mini_player_asks_for_the_open_sections_lyrics() {
+        let ctx = egui::Context::default();
+        let mut app = test_app("lyrics-section-switch");
+        crate::demo::populate(&mut app);
+        app.offline = false;
+        app.settings.winamp_window = false;
+        app.settings.lyrics_open = true;
+        app.show_lyrics_panel = false;
+        app.lyrics_fullscreen = None;
+        app.lyrics_uri = Some("spotify:track:the-last-song".into());
+        app.lyrics = Loadable::Loaded(None);
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:lyrics-section-switch".into(),
+            ..Default::default()
+        });
+        app.local.playback = Playback::Playing;
+        app.on_now_playing_changed();
+        app.apply(Action::ToggleWinampWindow, &ctx);
+        assert!(app.settings.winamp_window);
+        assert_eq!(
+            app.lyrics_uri.as_deref(),
+            Some("spotify:track:lyrics-section-switch")
         );
         assert!(matches!(app.lyrics, Loadable::Loading));
         app.backend.shutdown();
@@ -31134,6 +31216,49 @@ mod tests {
 
         assert!(app.network_reachable);
         assert_eq!(app.backend.take_playlist_item_requests().len(), 1);
+    }
+
+    /// An album or playlist FIND opened offline in the mini player is
+    /// asked for as the network comes back, whatever the big window shows.
+    #[test]
+    fn network_restored_recovers_finds_open_page_in_the_mini_player() {
+        use crate::ui::winamp::find::state::FindPage;
+        for (find_page, page) in [
+            (
+                FindPage::Album {
+                    id: "offline_album".into(),
+                    name: "Album".into(),
+                },
+                Page::Album("offline_album".into()),
+            ),
+            (
+                FindPage::Playlist {
+                    id: "offline_pl".into(),
+                    name: "Playlist".into(),
+                },
+                Page::Playlist("offline_pl".into()),
+            ),
+        ] {
+            let mut app = headless_app();
+            app.auth = AuthStatus::Connected {
+                username: "listener".into(),
+            };
+            app.network_reachable = false;
+            app.settings.winamp_window = true;
+            app.settings.find_open = true;
+            app.winamp.find.open(find_page);
+            // As FIND asks on drawing it.
+            app.ensure_loaded(page.clone());
+            assert!(app.backend.take_playlist_item_requests().is_empty());
+
+            app.handle_backend_events(vec![Event::NetworkStatus(true)]);
+
+            match &page {
+                Page::Album(id) => assert!(app.album_pages[id].album.is_loading()),
+                _ => assert_eq!(app.backend.take_playlist_item_requests().len(), 1),
+            }
+            app.backend.shutdown();
+        }
     }
 
     #[test]

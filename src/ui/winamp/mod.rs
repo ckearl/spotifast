@@ -466,12 +466,66 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let anchor = egui::PopupAnchor::Position(view.rect(picker_at).min);
     let picker_for = app.winamp.playlist_picker_for.take();
     item_menu::playlist_menu(app, &mut view, "keys", picker_for, anchor);
+    shortcuts_menu(app, &mut view, anchor);
+    // DEV's menu opens at DEV, which the rolled-up window has not got: a
+    // `g d` there is dropped rather than left to open the menu later.
+    if shaded {
+        app.winamp.open_devices = false;
+    }
 
     if vis_moving {
         crate::theme::visualiser_frame(&ctx, app.visualiser_fps());
     } else if now.is_some() {
         ctx.request_repaint_after(Duration::from_millis(220));
     }
+}
+
+/// The popup `?` opens, and closes again (R20).
+const SHORTCUTS_POPUP: &str = "mini-shortcuts";
+
+/// `?`'s list of keys, at `anchor`, in the mini player's menu style: the
+/// window's keys that work here, then the mini player's own. The big
+/// window's dialog draws only in the big window, so it is never asked for
+/// here.
+fn shortcuts_menu(app: &mut App, view: &mut View, anchor: egui::PopupAnchor) {
+    let ctx = view.ui.ctx().clone();
+    let id = egui::Id::new(SHORTCUTS_POPUP);
+    let asked = std::mem::take(&mut app.winamp.open_shortcuts);
+    let open = egui::Popup::is_id_open(&ctx, id);
+    if asked && open {
+        egui::Popup::close_id(&ctx, id);
+        return;
+    }
+    if !asked && !open {
+        return;
+    }
+    let popup = egui::Popup::new(id, ctx, anchor, view.ui.layer_id())
+        .kind(egui::PopupKind::Menu)
+        .layout(egui::Layout::top_down_justified(egui::Align::Min))
+        .open_memory(asked.then_some(egui::SetOpenCommand::Bool(true)))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    let [r, g, b] = view.skin.playlist.current;
+    let keys_colour = Color32::from_rgb(r, g, b);
+    let rows = crate::ui::keys::mini_shortcuts(app.locale);
+    menu(popup, view.skin, view.unit, |ui| {
+        let gap = ui.text_style_height(&egui::TextStyle::Body);
+        egui::Grid::new("mini-shortcuts-grid")
+            .num_columns(2)
+            .spacing(vec2(gap, 1.0))
+            .show(ui, |ui| {
+                for (keys, does) in &rows {
+                    if keys.is_empty() {
+                        // A heading: the mini player's own keys follow.
+                        ui.label(egui::RichText::new(does.as_ref()).color(keys_colour));
+                        ui.label("");
+                    } else {
+                        ui.label(egui::RichText::new(keys.as_ref()).color(keys_colour));
+                        ui.label(does.as_ref());
+                    }
+                    ui.end_row();
+                }
+            });
+    });
 }
 
 /// One section under the playlist, in its frame. Returns whether VIS's
@@ -1896,6 +1950,133 @@ mod tests {
             ..playing.clone()
         })));
         assert!(!stopped(Some(&playing)));
+    }
+
+    fn test_app() -> App {
+        let root = std::env::temp_dir().join(format!(
+            "spotifast-winamp-window-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut app = App::new(
+            &crate::backend::Waker::default(),
+            crate::paths::AppDirs {
+                config: root.join("config"),
+                state: root.join("state"),
+                cache: root.join("cache"),
+            },
+            crate::settings::Settings::default(),
+            crate::app::AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+                autostart: false,
+            },
+        );
+        crate::demo::populate(&mut app);
+        app.settings.winamp_window = true;
+        app.settings.skin_scale = Some(1);
+        app
+    }
+
+    /// One frame of the whole mini player.
+    fn draw(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(275.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| show(app, ui),
+        );
+        output.textures_delta.clear();
+    }
+
+    fn pressed(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// R20: `?` shows the keys in the mini player itself, and the big
+    /// window's dialog is never left waiting to pop up there later.
+    #[test]
+    fn question_mark_draws_the_shortcuts_inside_the_mini_player() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        draw(&mut app, &ctx, vec![]);
+        app.actions.clear();
+        draw(
+            &mut app,
+            &ctx,
+            vec![pressed(egui::Key::Questionmark, egui::Modifiers::SHIFT)],
+        );
+        draw(&mut app, &ctx, vec![]);
+        assert!(
+            egui::Popup::is_id_open(&ctx, egui::Id::new(SHORTCUTS_POPUP)),
+            "the list is open in the mini player"
+        );
+        assert!(
+            !app.actions
+                .iter()
+                .any(|action| matches!(action, Action::ShowDialog(_))),
+            "{:?}",
+            app.actions
+        );
+        let apply = egui::Context::default();
+        for action in std::mem::take(&mut app.actions) {
+            app.apply(action, &apply);
+        }
+        assert!(app.dialog.is_none(), "nothing waits for the big window");
+
+        // `?` again puts it away.
+        draw(
+            &mut app,
+            &ctx,
+            vec![pressed(egui::Key::Questionmark, egui::Modifiers::SHIFT)],
+        );
+        draw(&mut app, &ctx, vec![]);
+        assert!(!egui::Popup::is_id_open(
+            &ctx,
+            egui::Id::new(SHORTCUTS_POPUP)
+        ));
+        app.backend.shutdown();
+    }
+
+    /// `g d` with the main window rolled up has no DEV to open the menu
+    /// at; the ask is dropped, not left to open the menu on unshading.
+    #[test]
+    fn go_devices_while_shaded_never_lingers() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.settings.winamp_shaded = true;
+        draw(&mut app, &ctx, vec![]);
+        app.winamp.open_devices = true;
+        draw(&mut app, &ctx, vec![]);
+        assert!(!app.winamp.open_devices, "the ask is dropped");
+
+        app.settings.winamp_shaded = false;
+        app.actions.clear();
+        draw(&mut app, &ctx, vec![]);
+        draw(&mut app, &ctx, vec![]);
+        assert!(
+            !app.actions
+                .iter()
+                .any(|action| matches!(action, Action::RefreshDevices)),
+            "the menu stays closed: {:?}",
+            app.actions
+        );
+        app.backend.shutdown();
     }
 
     #[test]

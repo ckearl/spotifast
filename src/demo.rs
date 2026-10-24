@@ -1544,6 +1544,20 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             "presets" => app.winamp.open_presets = true,
             // DEV's menu open, as `g d` opens it.
             "devices-menu" => app.winamp.open_devices = true,
+            // The mini player's `?` list of keys (R20).
+            "shortcuts-mini" => app.winamp.open_shortcuts = true,
+            // FIND on an album opened with the network away.
+            "find-offline" => {
+                use crate::ui::winamp::find::state::FindPage;
+                app.settings.find_open = true;
+                app.settings.find_height = 203;
+                app.network_reachable = false;
+                let _ = app.winamp.find.set_query(String::new());
+                app.winamp.find.open(FindPage::Album {
+                    id: "offline-album".into(),
+                    name: "Album".into(),
+                });
+            }
             // A headphone correction saved as a preset, and in use.
             "eq-user-presets" => {
                 let bands_db = [1.2, 0.0, -1.9, -2.0, 0.0, 1.6, 1.6, 2.6, 0.0, -4.4];

@@ -105,8 +105,8 @@ pub struct WinampState {
     /// The playlist window: its first visible row, the row clicked, the
     /// wheel's leftover, and the corner drag's leftover.
     pub playlist_scroll: usize,
-    /// The rows selected, by URI; Ctrl-click adds and removes, SEL has
-    /// the rest.
+    /// The rows selected, by their place in the list; Ctrl-click adds and
+    /// removes, SEL has the rest.
     pub playlist_selection: std::collections::HashSet<usize>,
     pub playlist_wheel: f32,
     pub playlist_resize: f32,
@@ -128,6 +128,13 @@ pub struct WinampState {
     pub playlist_picker_for: Option<crate::ui::winamp::find::state::FindRow>,
     /// Open the devices menu on the next frame; `g d` asks for it.
     pub open_devices: bool,
+    /// Open the mini player's own shortcuts list on the next frame; `?`
+    /// asks for it (R20).
+    pub open_shortcuts: bool,
+    /// The PL row the keys act on, by its index and the song it held when
+    /// it was picked: the queue moves on under an index, and the keys
+    /// must never act on whichever song moved into it.
+    pub playlist_picked: Option<(usize, String)>,
     /// What the marquee says once, such as the device just chosen, and
     /// when it began saying it.
     announcement: Option<(String, Instant)>,
@@ -189,6 +196,8 @@ impl WinampState {
             keys: Default::default(),
             playlist_picker_for: None,
             open_devices: false,
+            open_shortcuts: false,
+            playlist_picked: None,
             announcement: None,
             lyrics_scroll: 0,
             lyrics_wheel: 0.0,

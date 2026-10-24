@@ -196,6 +196,57 @@ pub fn shortcuts(locale: Locale) -> Vec<(Cow<'static, str>, Cow<'static, str>)> 
     rows
 }
 
+/// The rows of the mini player's `?` list (R20): the window's keys that
+/// still work there, then the mini player's own. The big window's own
+/// keys, for its pages, panels and song lists, are left out, and Q and L
+/// are the mini player's sections there.
+pub fn mini_shortcuts(locale: Locale) -> Vec<(Cow<'static, str>, Cow<'static, str>)> {
+    let keys = |text: &'static str| Cow::Borrowed(text);
+    let mut rows = vec![
+        (
+            pgettext(locale, "key", "Space"),
+            gettext(locale, "Play or pause"),
+        ),
+        (
+            keys(platform_shortcut("Ctrl+←  /  Ctrl+→", "Cmd+←  /  Cmd+→")),
+            gettext(locale, "Previous or next"),
+        ),
+        (
+            keys("Shift+←  /  Shift+→"),
+            gettext(locale, "Seek 10 seconds"),
+        ),
+        (
+            keys(platform_shortcut("Ctrl+↑  /  Ctrl+↓", "Cmd+↑  /  Cmd+↓")),
+            gettext(locale, "Volume up or down"),
+        ),
+        (keys("M"), gettext(locale, "Mute or unmute")),
+        (
+            keys("B"),
+            gettext(locale, "Like or unlike the playing song"),
+        ),
+        (keys("S"), gettext(locale, "Toggle shuffle")),
+        (keys("R"), gettext(locale, "Cycle repeat")),
+        (keys(WINAMP_SHORTCUT), gettext(locale, "Big window")),
+        (
+            keys(MILKDROP_SHORTCUT),
+            gettext(locale, "MilkDrop, under the mini player"),
+        ),
+        (
+            if cfg!(target_os = "macos") {
+                // Translators: Keep the key names. Only the word "or" is translated.
+                gettext(locale, "Cmd+/ or ?")
+            } else {
+                // Translators: Keep the key names. Only the word "or" is translated.
+                gettext(locale, "Ctrl+/ or ?")
+            },
+            gettext(locale, "Keyboard shortcuts"),
+        ),
+        (keys(QUIT_SHORTCUT), gettext(locale, "Quit")),
+    ];
+    rows.extend(mini_player_shortcuts(locale));
+    rows
+}
+
 /// The mini player's own keys (`crate::ui::winamp::keys`): one for each
 /// section, and two pressed one after the other for the picked row, or
 /// the playing song when no list has one picked.
@@ -571,6 +622,71 @@ mod tests {
             ],
             expected
         );
+    }
+
+    /// R20: the mini player's `?` list: its own keys, then the window's
+    /// keys that still work in it, and none of the big window's own.
+    #[test]
+    fn the_mini_players_list_has_its_keys_and_the_window_keys_that_work_there() {
+        let rows = mini_shortcuts(Locale::English);
+        let has = |keys: &str| rows.iter().any(|(candidate, _)| candidate == keys);
+        for keys in ["E", "V", "Y", "G  D", "A  Q", "D  Q", "M", "S", "R", "B"] {
+            assert!(has(keys), "{keys}");
+        }
+        assert!(has(WINAMP_SHORTCUT) && has(MILKDROP_SHORTCUT) && has(QUIT_SHORTCUT));
+        assert!(has("Shift+←  /  Shift+→"));
+        for keys in ["Alt+←  /  Alt+→", "F", SIDEBAR_SHORTCUT, "Delete"] {
+            assert!(!has(keys), "{keys} does nothing in the mini player");
+        }
+        // Q and L open the mini player's own sections, listed once.
+        assert_eq!(rows.iter().filter(|(keys, _)| keys == "Q").count(), 1);
+        assert_eq!(rows.iter().filter(|(keys, _)| keys == "L").count(), 1);
+    }
+
+    /// The big window's `?` still opens its dialog.
+    #[test]
+    fn question_mark_opens_the_big_windows_dialog() {
+        let root =
+            std::env::temp_dir().join(format!("spotifast-help-key-test-{}", std::process::id()));
+        let mut app = App::new(
+            &crate::backend::Waker::default(),
+            AppDirs {
+                config: root.join("config"),
+                state: root.join("state"),
+                cache: root.join("cache"),
+            },
+            Settings::default(),
+            AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+                autostart: false,
+            },
+        );
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: Key::Questionmark,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::SHIFT,
+                }],
+                ..Default::default()
+            },
+            |ui| handle(&mut app, ui.ctx()),
+        );
+        output.textures_delta.clear();
+        assert!(
+            matches!(
+                app.actions.as_slice(),
+                [Action::ShowDialog(Dialog::Shortcuts)]
+            ),
+            "{:?}",
+            app.actions
+        );
+        app.backend.shutdown();
     }
 
     #[test]

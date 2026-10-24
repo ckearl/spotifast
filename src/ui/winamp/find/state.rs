@@ -153,6 +153,21 @@ pub enum FindPage {
     },
 }
 
+impl FindPage {
+    /// The big window's page that loads what this one lists; `None` for
+    /// the top, which lists the search or the library.
+    pub fn as_page(&self) -> Option<crate::model::Page> {
+        use crate::model::Page;
+        Some(match self {
+            FindPage::Top => return None,
+            FindPage::Artist { id, .. } => Page::Artist(id.clone()),
+            FindPage::Album { id, .. } => Page::Album(id.clone()),
+            FindPage::Playlist { id, .. } => Page::Playlist(id.clone()),
+            FindPage::Radio { seed, .. } => Page::Radio(seed.clone()),
+        })
+    }
+}
+
 pub struct FindState {
     pub query: String,
     pub mode: FindMode,

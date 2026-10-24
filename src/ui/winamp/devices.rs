@@ -161,23 +161,27 @@ pub(super) fn popup(app: &mut App, skin: &crate::skin::Skin, unit: f32, button: 
     }
 }
 
+/// The greyed line over an empty list: still looking, or found none. A
+/// list already showing devices needs neither.
+fn heading(app: &App, listed: &[Entry]) -> Option<std::borrow::Cow<'static, str>> {
+    if !listed.is_empty() {
+        return None;
+    }
+    Some(if app.devices_loading {
+        gettext(app.locale, "Finding devices…")
+    } else {
+        gettext(app.locale, "No devices found")
+    })
+}
+
 /// The menu's contents, inside `super::menu`'s popup.
 pub(super) fn menu(app: &mut App, ui: &mut Ui) {
     let font = ui.text_style_height(&egui::TextStyle::Button);
     ui.set_min_width(font * 12.0);
     let weak = ui.visuals().weak_text_color();
-    if app.devices_loading {
-        ui.add_enabled(
-            false,
-            egui::Label::new(gettext(app.locale, "Finding devices…").as_ref()),
-        );
-    }
     let listed = entries(app);
-    if listed.is_empty() {
-        ui.add_enabled(
-            false,
-            egui::Label::new(gettext(app.locale, "No devices found").as_ref()),
-        );
+    if let Some(heading) = heading(app, &listed) {
+        ui.add_enabled(false, egui::Label::new(heading.as_ref()));
     }
     // The check sits in a gutter of its own, so the names line up.
     let gutter = font;
@@ -327,6 +331,33 @@ mod tests {
         app.actions.clear();
         frame(&mut app);
         assert!(app.actions.is_empty(), "still open: {:?}", app.actions);
+        app.backend.shutdown();
+    }
+
+    /// "Finding devices…" heads only an empty list: a list already
+    /// showing devices is not told it is still being found.
+    #[test]
+    fn finding_devices_shows_only_while_none_are_listed() {
+        let mut app = test_app();
+        app.local_device_id = Some("local".into());
+        app.local_ready = true;
+        app.devices_loading = true;
+        app.devices = vec![device("k", "Kitchen", "speaker")];
+        assert_eq!(heading(&app, &entries(&app)), None);
+        // This computer is listed once playback here is ready; with no
+        // id for it yet, the list is empty.
+        app.devices.clear();
+        app.local_device_id = None;
+        assert!(entries(&app).is_empty());
+        assert_eq!(
+            heading(&app, &entries(&app)).as_deref(),
+            Some("Finding devices…")
+        );
+        app.devices_loading = false;
+        assert_eq!(
+            heading(&app, &entries(&app)).as_deref(),
+            Some("No devices found")
+        );
         app.backend.shutdown();
     }
 

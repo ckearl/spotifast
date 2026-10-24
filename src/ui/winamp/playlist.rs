@@ -356,14 +356,36 @@ fn item_row(row: &Row) -> FindRow {
     }
 }
 
-/// The first row picked in PL while it is open, for the keys to act on.
-pub(super) fn selected_row(app: &App) -> Option<FindRow> {
+/// What PL has picked for the keys to act on.
+pub(super) enum Picked {
+    /// The row, where the picked song now is.
+    Row(FindRow),
+    /// The picked song has left the list.
+    Gone,
+}
+
+/// The first row picked in PL while it is open, for the keys to act on:
+/// found by the song it held when picked, which the queue moving on may
+/// have shifted to another place. The nearest copy of it wins, for a song
+/// queued twice.
+pub(super) fn selected_row(app: &App) -> Option<Picked> {
     if !app.settings.playlist_open {
         return None;
     }
-    let first = app.winamp.playlist_selection.iter().min()?;
+    let first = *app.winamp.playlist_selection.iter().min()?;
     let (rows, _) = rows(app, app.now_playing().as_ref());
-    rows.get(*first).map(item_row)
+    let uri = match &app.winamp.playlist_picked {
+        Some((index, uri)) if *index == first => uri,
+        // Picked some other way than PL's own clicks and menus.
+        _ => return rows.get(first).map(|row| Picked::Row(item_row(row))),
+    };
+    let found = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.uri == *uri)
+        .min_by_key(|(index, _)| index.abs_diff(first))
+        .map(|(_, row)| Picked::Row(item_row(row)));
+    Some(found.unwrap_or(Picked::Gone))
 }
 
 /// The playing song as PL's first row has it.
@@ -456,6 +478,7 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
                 selection.clear();
                 selection.insert(index);
             }
+            repick(app, rows);
         }
         // A right-click picks the row, unless it is already among those
         // picked, and opens its actions.
@@ -467,6 +490,7 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
                 selection.clear();
                 selection.insert(index);
             }
+            repick(app, rows);
             opened = Some((item_row(row), Some(RowContext::Queue)));
         }
         if response.double_clicked()
@@ -729,6 +753,19 @@ fn sel_menu(app: &mut App, ui: &mut egui::Ui, rows: &[Row]) {
             }
         }
     }
+    repick(app, rows);
+}
+
+/// Notes the row the keys act on, the first picked, with the song it
+/// holds now: an index alone would name another song once the queue
+/// moves on.
+fn repick(app: &mut App, rows: &[Row]) {
+    let winamp = &mut app.winamp;
+    winamp.playlist_picked = winamp
+        .playlist_selection
+        .iter()
+        .min()
+        .and_then(|index| Some((*index, rows.get(*index)?.uri.clone())));
 }
 
 /// The pages of the selected song, or of the one playing.
@@ -948,6 +985,11 @@ mod tests {
         }
         assert!(app.winamp.playlist_selection.contains(&1));
         assert_eq!(app.winamp.playlist_selection.len(), 1);
+        assert_eq!(
+            app.winamp.playlist_picked,
+            Some((1, rows[1].uri.clone())),
+            "the keys' row, by its song as well as its place"
+        );
         assert!(egui::Popup::is_id_open(
             &ctx,
             egui::Id::new(("item-menu", "playlist"))

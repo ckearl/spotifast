@@ -3,7 +3,8 @@
 //!
 //! They come between FIND's box, which keeps every key typed into it, and
 //! the window's own keys (`crate::ui::keys`), which get what is left:
-//! Space, M, S, R, B and ? among them.
+//! Space, M, S, R and B among them. `?` is taken here, for the mini
+//! player's own list of keys.
 
 use std::time::{Duration, Instant};
 
@@ -170,6 +171,11 @@ pub(super) fn handle(app: &mut App, ctx: &egui::Context) {
     if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::F)) {
         commands.push(Command::FocusFind);
     }
+    // The window's keys list, drawn here: the big window's dialog shows
+    // only in the big window (R20).
+    if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::Slash)) {
+        app.winamp.open_shortcuts = true;
+    }
     // While FIND's box or another text field has the keyboard, the keys
     // are its: FIND's took them already, and an egui field's are its own.
     let keys = &mut app.winamp.keys;
@@ -178,6 +184,13 @@ pub(super) fn handle(app: &mut App, ctx: &egui::Context) {
     } else {
         keys.expire(now);
         ctx.input_mut(|input| {
+            // `?`, typed with Shift on most layouts and without on some.
+            if input.consume_key(Modifiers::SHIFT, Key::Questionmark)
+                || input.consume_key(Modifiers::NONE, Key::Questionmark)
+            {
+                keys.pending = None;
+                app.winamp.open_shortcuts = true;
+            }
             input.events.retain(|event| {
                 let Event::Key {
                     key,
@@ -240,7 +253,13 @@ fn target(app: &App) -> Option<Target> {
     let picked = if app.winamp.find_picked_last {
         find::selected_row(app)
     } else {
-        playlist::selected_row(app).map(|row| (row, Some(RowContext::Queue)))
+        match playlist::selected_row(app) {
+            Some(playlist::Picked::Row(row)) => Some((row, Some(RowContext::Queue))),
+            // The song picked left PL: nothing to act on, rather than
+            // whatever took its place or the playing song.
+            Some(playlist::Picked::Gone) => return None,
+            None => None,
+        }
     };
     match picked {
         Some((row, context)) => Some(Target {
@@ -321,6 +340,7 @@ fn remove_from_queue(app: &mut App) {
     if let Some(index) = index.filter(|index| app.can_remove_from_queue(*index)) {
         // The rows below move up, so the selection would name others.
         app.winamp.playlist_selection.clear();
+        app.winamp.playlist_picked = None;
         app.actions.push(Action::RemoveFromQueue {
             rows: vec![(index, uri)],
         });
@@ -591,7 +611,6 @@ mod tests {
             (Key::S, "s", "ToggleShuffle"),
             (Key::R, "r", "CycleRepeat"),
             (Key::B, "b", "ToggleSaved"),
-            (Key::Questionmark, "?", "ShowDialog(Shortcuts)"),
         ] {
             app.actions.clear();
             frame(&mut app, &ctx, typed(key, text));
@@ -601,6 +620,35 @@ mod tests {
                 "{key:?} pushed {:?}",
                 app.actions
             );
+        }
+        app.backend.shutdown();
+    }
+
+    /// R20: `?`, with or without the Shift that types it, and Cmd+/
+    /// open the mini player's own list of keys. The big window's dialog,
+    /// which only the big window draws, is never asked for: it would show
+    /// nothing here and then pop up unasked in the big window.
+    #[test]
+    fn question_mark_opens_the_mini_players_shortcuts_not_the_dialog() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let key = |key, modifiers| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        for event in [
+            key(Key::Questionmark, Modifiers::NONE),
+            key(Key::Questionmark, Modifiers::SHIFT),
+            key(Key::Slash, Modifiers::COMMAND),
+        ] {
+            app.actions.clear();
+            app.winamp.open_shortcuts = false;
+            frame(&mut app, &ctx, vec![event.clone()]);
+            assert!(app.winamp.open_shortcuts, "{event:?}");
+            assert!(app.actions.is_empty(), "{event:?}: {:?}", app.actions);
         }
         app.backend.shutdown();
     }
@@ -832,6 +880,65 @@ mod tests {
             app.actions
         );
         assert!(app.winamp.playlist_selection.is_empty());
+        app.backend.shutdown();
+    }
+
+    /// PL picks a row by its place, and the queue moves on under it: the
+    /// keys act on the song that was picked, wherever it now is, never on
+    /// whichever song moved into its place, and on nothing once it is gone.
+    #[test]
+    fn keys_act_on_the_song_picked_in_pl_after_the_queue_moves_on() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let now = app.now_playing();
+        app.local_ready = true;
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: now.as_ref().unwrap().uri.clone(),
+            ..Default::default()
+        });
+        app.local.playback = crate::player::Playback::Paused;
+        let queued: Vec<String> = app.queue.get().unwrap().queue[..3]
+            .iter()
+            .map(|item| item.uri().to_string())
+            .collect();
+        app.manual_queue = queued.clone();
+        app.settings.playlist_open = true;
+        // Row 2, the second queued song, picked.
+        app.winamp.playlist_selection.insert(2);
+        app.winamp.playlist_picked = Some((2, queued[1].clone()));
+
+        // The first queued song comes on: the picked one is row 1 now.
+        let queue = app.queue.get_mut().unwrap();
+        let head = queue.queue.remove(0);
+        queue.currently_playing = Some(head);
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: queued[0].clone(),
+            ..Default::default()
+        });
+        app.manual_queue = queued[1..].to_vec();
+
+        sequence(&mut app, &ctx, Key::A, Key::Q);
+        assert_eq!(super::tests::queued(&app), [queued[1].clone()]);
+        app.actions.clear();
+        sequence(&mut app, &ctx, Key::D, Key::Q);
+        assert!(
+            matches!(
+                app.actions.as_slice(),
+                [Action::RemoveFromQueue { rows }] if *rows == [(0, queued[1].clone())]
+            ),
+            "{:?}",
+            app.actions
+        );
+
+        // Gone from the list: the keys do nothing, not act on the song
+        // playing or the one in its place.
+        app.winamp.playlist_selection.insert(2);
+        app.winamp.playlist_picked = Some((2, "spotify:track:gone".into()));
+        app.actions.clear();
+        sequence(&mut app, &ctx, Key::A, Key::Q);
+        sequence(&mut app, &ctx, Key::A, Key::N);
+        sequence(&mut app, &ctx, Key::D, Key::Q);
+        assert!(app.actions.is_empty(), "{:?}", app.actions);
         app.backend.shutdown();
     }
 

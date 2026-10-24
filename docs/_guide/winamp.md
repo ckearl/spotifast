@@ -117,6 +117,11 @@ searches of the main window.
   **Remove from Your Library** is never offered for a playlist you own. Add to
   queue on a playlist loads the whole playlist first, then queues it.
 
+If an album or playlist cannot load because you are offline, FIND says so and
+loads it on its own once the connection is back. If a search fails, FIND says
+so in one line instead of showing the last results; click the line to search
+again.
+
 **Esc** steps out one level at a time. In the box it leaves the box and keeps
 your results, so you can use the keys on them. Outside the box it clears the
 text. With the box empty it closes FIND.
@@ -150,8 +155,9 @@ The mini player has its own keys, alongside the usual ones such as Space. They
 do nothing while you type in the FIND box. Some take two keys, one after the
 other: the first shows in the title display until the second arrives, and is
 forgotten after a second. A key that is not a letter, such as Space, cancels
-it and then does its normal job. The same list is in the **?** shortcuts
-dialog.
+it and then does its normal job. Press **?**, or Ctrl+/ (Cmd+/ on macOS), to
+see this list in the mini player, together with the usual keys that work there.
+Press it again, or click outside it, to close it.
 
 | Key | Does |
 | --- | --- |
@@ -177,7 +183,9 @@ dialog.
 | D Q | Remove from queue |
 
 The two-key commands act on the row picked in FIND or the playlist, or on the
-playing song when nothing is picked.
+playing song when nothing is picked. A song picked in the playlist stays the
+one they act on as the queue moves on; once it has left the list, they do
+nothing. **G D** needs the main window rolled down, where DEV is.
 
 ## Equalizer
 

@@ -77,13 +77,33 @@ fn search_rows(app: &App) -> Vec<FindRow> {
     }
 }
 
+/// Why the search for what the box holds failed, while the mode's half
+/// of its answer has not come. A failed search raises no notice of its
+/// own, so this is the only word of it.
+fn search_error(app: &App) -> Option<&str> {
+    let search = &app.search;
+    let error = search.error.as_deref()?;
+    if search.committed != app.winamp.find.query.trim() {
+        return None;
+    }
+    let (catalogue, lists) = arrived(app);
+    let live = if app.winamp.find.mode == FindMode::Lists {
+        lists
+    } else {
+        catalogue
+    };
+    (!live).then_some(error)
+}
+
 /// A page's rows as far as they have come.
 #[derive(Default)]
 struct Listing {
     rows: Arc<Vec<FindRow>>,
-    /// Why the rows stop short, and the page a click loads again; `None`
-    /// for your playlists, which the app asks for again by itself.
-    failed: Option<(String, Option<Page>)>,
+    /// Why the rows stop short, and what a click on that line asks again:
+    /// the page loaded again, or the search run again; `None` where the
+    /// app asks again by itself (your playlists, a page waiting for the
+    /// network).
+    failed: Option<(String, Option<Action>)>,
     /// More rows are on their way.
     loading: bool,
     /// What asks for the next rows, once the list is scrolled near its end.
@@ -92,7 +112,7 @@ struct Listing {
 
 impl Listing {
     fn fail(&mut self, error: &str, page: Option<Page>) {
-        self.failed = Some((error.to_string(), page));
+        self.failed = Some((error.to_string(), page.map(Action::Reload)));
     }
 }
 
@@ -307,6 +327,18 @@ fn source<'a>(app: &'a App, page: &'a FindPage) -> (Listing, Build<'a>) {
         FindPage::Top => {
             let find = &app.winamp.find;
             if !find.query.trim().is_empty() {
+                // A search for what the box holds that failed says so,
+                // rather than leave the last answer looking like its own.
+                if let Some(error) = search_error(app) {
+                    let listing = Listing {
+                        failed: Some((
+                            error.to_string(),
+                            Some(Action::FindSearch(find.query.trim().to_string())),
+                        )),
+                        ..Listing::default()
+                    };
+                    return (listing, none);
+                }
                 // At most fifteen rows: made afresh each frame.
                 return (
                     Listing::default(),
@@ -496,6 +528,22 @@ fn source<'a>(app: &'a App, page: &'a FindPage) -> (Listing, Build<'a>) {
 /// What `page` lists now. Its rows are made again only when what they
 /// are made from has changed: Liked Songs alone can hold thousands.
 fn listing(app: &App, page: &FindPage) -> Listing {
+    let mut listing = held_listing(app, page);
+    // Nothing comes while the network is away, and the page is asked for
+    // again as it returns: say so, never a blank list.
+    if listing.rows.is_empty()
+        && listing.loading
+        && listing.failed.is_none()
+        && !app.network_reachable
+    {
+        listing.loading = false;
+        listing.failed = Some((gettext(app.locale, "You're offline").into_owned(), None));
+    }
+    listing
+}
+
+/// [`listing`] before it is told the network is away.
+fn held_listing(app: &App, page: &FindPage) -> Listing {
     let (mut listing, (at, build)) = source(app, page);
     let Some(at) = at else {
         listing.rows = Arc::new(build());
@@ -535,8 +583,9 @@ pub(super) fn visible_rows(app: &App) -> Arc<Vec<FindRow>> {
     }
 }
 
-/// Asks for what the page shown lists, once, when nothing of it is held:
-/// as the big window's pages do on opening.
+/// Asks for what the page shown lists when nothing of it has been asked
+/// for: as the big window's pages do on opening, and again once the
+/// network is back for a page opened without it.
 fn fetch(app: &mut App) {
     let page = app.winamp.find.page().clone();
     match page {
@@ -559,13 +608,26 @@ fn fetch(app: &mut App) {
             }
         },
         FindPage::Top => {}
+        // Asked again while nothing has been asked of Spotify: a page
+        // opened offline holds an entry that was never sent for. A failed
+        // one waits for its line's Retry.
         FindPage::Album { id, .. } => {
-            if !app.album_pages.contains_key(&id) {
+            let unasked = app.album_pages.get(&id).is_none_or(|page| {
+                app.network_reachable && matches!(page.album, Loadable::NotLoaded)
+            });
+            if unasked {
                 app.ensure_loaded(Page::Album(id));
             }
         }
         FindPage::Playlist { id, .. } => {
-            if !app.playlist_pages.contains_key(&id) {
+            let unasked = app.playlist_pages.get(&id).is_none_or(|page| {
+                app.network_reachable
+                    && (matches!(page.playlist, Loadable::NotLoaded)
+                        || !page.items.loaded_once
+                            && page.items.can_load_more()
+                            && page.items.error.is_none())
+            });
+            if unasked {
                 app.ensure_loaded(Page::Playlist(id));
             }
         }
@@ -648,8 +710,8 @@ impl<'a> Lines<'a> {
 fn pick(app: &mut App, listing: &Listing, index: usize) {
     if index < listing.rows.len() {
         select(app, index);
-    } else if let Some((_, Some(page))) = &listing.failed {
-        app.actions.push(Action::Reload(page.clone()));
+    } else if let Some((_, Some(retry))) = &listing.failed {
+        app.actions.push(retry.clone());
     }
 }
 
@@ -1733,6 +1795,110 @@ mod tests {
             page_rows(&app, &FindPage::Top),
             Loadable::Loaded(rows) if kinds(&rows) == [ItemKind::Song]
         ));
+        app.backend.shutdown();
+    }
+
+    fn offline_app() -> App {
+        let mut app = test_app();
+        app.auth = crate::backend::AuthStatus::Connected {
+            username: "listener".into(),
+        };
+        app.network_reachable = false;
+        app.settings.winamp_window = true;
+        app.settings.find_open = true;
+        app
+    }
+
+    fn offline_pages() -> [FindPage; 2] {
+        [
+            FindPage::Album {
+                id: "offline_album".into(),
+                name: "Album".into(),
+            },
+            FindPage::Playlist {
+                id: "offline_pl".into(),
+                name: "Playlist".into(),
+            },
+        ]
+    }
+
+    /// Whether the album or playlist has been asked of Spotify.
+    fn requested(app: &App, page: &FindPage) -> bool {
+        match page {
+            FindPage::Album { id, .. } => app.album_pages[id].album.is_loading(),
+            FindPage::Playlist { id, .. } => app.playlist_pages[id].items.loading,
+            _ => unreachable!(),
+        }
+    }
+
+    /// An album or playlist opened offline says so in one line, never a
+    /// blank list, and is asked for once the network is back, even when
+    /// FIND was not drawn as it came back.
+    #[test]
+    fn a_page_opened_offline_says_so_then_loads_when_back_online() {
+        for page in offline_pages() {
+            let mut app = offline_app();
+            app.winamp.find.open(page.clone());
+            fetch(&mut app);
+            fetch(&mut app);
+            assert!(!requested(&app, &page), "{page:?}");
+            let shown = listing(&app, &page);
+            let lines = Lines::new(&app, &shown);
+            assert_eq!(lines.count(), 1, "{page:?}: one line, not a blank list");
+            assert!(
+                lines.line(0).label.contains("offline"),
+                "{page:?}: {}",
+                lines.line(0).label
+            );
+
+            app.network_reachable = true;
+            fetch(&mut app);
+            assert!(requested(&app, &page), "{page:?}");
+            assert!(matches!(page_rows(&app, &page), Loadable::Loading));
+            app.backend.shutdown();
+        }
+    }
+
+    /// A search that failed for what the box holds says so in FIND's one
+    /// error line, never under the last search's rows; the line asks again.
+    #[test]
+    fn a_failed_search_shows_its_error_not_the_last_answer() {
+        let mut app = searched_app();
+        app.winamp.find.set_query("Bonobo".into());
+        hold_answer(&mut app);
+        assert!(!visible_rows(&app).is_empty());
+
+        // The next search fails.
+        app.winamp.find.set_query("Khruangbin".into());
+        app.search.committed = "Khruangbin".into();
+        app.search.serial += 1;
+        app.search.catalogue_pending = false;
+        app.search.playlists_pending = false;
+        app.search.error = Some("search: Spotify did not answer".into());
+        app.search.results = Loadable::Failed("search: Spotify did not answer".into());
+
+        let page = FindPage::Top;
+        assert!(visible_rows(&app).is_empty(), "not Bonobo's rows");
+        let shown = listing(&app, &page);
+        let lines = Lines::new(&app, &shown);
+        assert_eq!(lines.count(), 1);
+        assert!(
+            lines.line(0).label.contains("Retry"),
+            "{}",
+            lines.line(0).label
+        );
+        app.actions.clear();
+        pick(&mut app, &shown, 0);
+        assert!(
+            matches!(app.actions.as_slice(), [Action::FindSearch(query)] if query == "Khruangbin"),
+            "{:?}",
+            app.actions
+        );
+
+        // Typed on past the failed query: the last answer shown stays.
+        app.winamp.find.set_query("Bonobo".into());
+        app.search.error = None;
+        assert!(!visible_rows(&app).is_empty());
         app.backend.shutdown();
     }
 
